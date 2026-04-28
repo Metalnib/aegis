@@ -1,0 +1,11 @@
+apiVersion: v2
+name: aegis
+description: Autonomous AI code-review agent for .NET microservice fleets.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/metalnib/aegis
+sources:
+  - https://github.com/metalnib/aegis
+maintainers:
+  - name: Metalnib

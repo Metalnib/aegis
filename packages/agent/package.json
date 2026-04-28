@@ -1,0 +1,31 @@
+{
+  "name": "@aegis/agent",
+  "version": "0.1.0",
+  "description": "LLM agent worker: skill loader, MCP client, tool-call loop",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "@aegis/sdk": "workspace:*",
+    "@aegis/core": "workspace:*",
+    "@mariozechner/pi-agent-core": "^0.70.5",
+    "@mariozechner/pi-ai": "^0.70.5",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "*"
+  }
+}

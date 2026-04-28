@@ -1,0 +1,16 @@
+export { EventBus } from "./bus.js";
+export { Queue } from "./queue.js";
+export type { DlqEntry, AuditEntry } from "./queue.js";
+export { renderDashboard } from "./dashboard.js";
+export type { DashboardData } from "./dashboard.js";
+export { Supervisor } from "./supervisor.js";
+export { GitSync } from "./git-sync.js";
+export { HttpServer } from "./http-server.js";
+export type { HttpServerOptions } from "./http-server.js";
+export { Metrics } from "./metrics.js";
+export { Semaphore } from "./semaphore.js";
+export { loadConfig, defineConfig } from "./config.js";
+export { EnvSecrets } from "./secrets.js";
+export { SqliteKvStore } from "./kv-store.js";
+export { createLogger } from "./logger.js";
+export type { AegisConfig, CodeHostConfig, ChatConfig, QueueConfig, SynopsisConfig, AgentConfig, HttpConfig } from "./config.js";

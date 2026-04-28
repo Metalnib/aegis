@@ -1,0 +1,32 @@
+{
+  "name": "@aegis/cli",
+  "version": "0.1.0",
+  "description": "Aegis CLI - serve command and config validation",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aegis": "./dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "@aegis/sdk": "workspace:*",
+    "@aegis/core": "workspace:*",
+    "@aegis/agent": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "*"
+  }
+}

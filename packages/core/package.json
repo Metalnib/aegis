@@ -1,0 +1,30 @@
+{
+  "name": "@aegis/core",
+  "version": "0.1.0",
+  "description": "Event bus, queue, supervisor, git-sync, and config for Aegis",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "@aegis/sdk": "workspace:*",
+    "better-sqlite3": "^11.10.0",
+    "zod": "^3.25.20"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "typescript": "*"
+  }
+}

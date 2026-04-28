@@ -1,0 +1,53 @@
+Aegis
+Copyright (c) 2026 Metalnib
+
+Licensed under the MIT License (see LICENSE).
+
+This product includes software and assets from the following sources. All are
+permissively licensed (MIT) and redistributed here in accordance with their
+terms.
+
+---
+
+## Forked from
+
+**pi-mono** — https://github.com/badlogic/pi-mono
+Copyright (c) Mario Zechner
+Licensed under the MIT License.
+
+Aegis forks `pi-mono` and modifies its agent runtime, tool execution, CLI,
+session storage, and system prompt assembly. Modified source files carry an
+additional copyright notice for Metalnib while preserving the original.
+
+## Build-time assets
+
+**dotnet-episteme-skills** — https://github.com/Metalnib/dotnet-episteme-skills
+Copyright (c) Metalnib
+Licensed under the MIT License.
+
+The Synopsis .NET binary and the `dotnet-techne-*` skill markdown files are
+built from `dotnet-episteme-skills` and copied into the Aegis Docker image.
+
+## Runtime dependencies (bundled in the Docker image)
+
+**Node.js** — https://nodejs.org
+Copyright (c) OpenJS Foundation and Node.js contributors
+Licensed under the MIT License.
+
+**Microsoft.CodeAnalysis (Roslyn)** — https://github.com/dotnet/roslyn
+Copyright (c) .NET Foundation and Contributors
+Licensed under the MIT License.
+
+**Microsoft.Build, Microsoft.Build.Locator** — https://github.com/dotnet/msbuild
+Copyright (c) .NET Foundation and Contributors
+Licensed under the MIT License.
+
+---
+
+Modified `pi-mono` source files carry a header of the form:
+
+    // Based on pi-mono (https://github.com/badlogic/pi-mono)
+    // Copyright (c) Mario Zechner — MIT License
+    // Modifications: Copyright (c) 2026 Metalnib — MIT License
+
+Unmodified vendored files retain their original headers only.

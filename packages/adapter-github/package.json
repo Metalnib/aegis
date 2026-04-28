@@ -1,0 +1,29 @@
+{
+  "name": "@aegis/adapter-github",
+  "version": "0.1.0",
+  "description": "GitHub code-host adapter for Aegis (polling)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "dependencies": {
+    "@aegis/sdk": "workspace:*",
+    "@octokit/rest": "^21.1.1",
+    "@octokit/types": "^13.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "*"
+  }
+}

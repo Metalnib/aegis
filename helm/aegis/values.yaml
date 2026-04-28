@@ -1,0 +1,78 @@
+image:
+  repository: aegis
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Aegis is single-replica by design - SQLite is single-writer and chat
+# adapter sessions assume one process. Set replicas to 0 to suspend.
+replicas: 1
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 4Gi
+
+# Inline aegis.config.ts. Mounted into the container at /opt/aegis/aegis.config.js.
+# Replace this with your real config.
+config: |
+  // Aegis config. See docs/CONFIGURATION.md for the full schema.
+  module.exports = {
+    workspace: "/workspace",
+    synopsis: { transport: "unix", path: "/var/run/aegis/synopsis.sock" },
+    agent: { provider: "anthropic", model: "claude-opus-4-7", concurrency: 4, jobTimeoutSec: 600 },
+    http: { port: 8080, bindAddr: "0.0.0.0", metricsTokenEnv: "METRICS_TOKEN" },
+    codeHosts: [],
+    chats: [],
+    skills: ["dotnet-techne-cross-repo-impact", "dotnet-techne-code-review"],
+    queue: { retries: 3, backoff: "exponential" },
+    logging: { level: "info", format: "json" },
+  };
+
+# Optional inline SOUL.md override. Leave empty to use the image default.
+soul: ""
+
+# Secrets: each key becomes an env var in the container with its value drawn
+# from a k8s Secret. Provide the values via --set-string or external-secrets.
+# Example:
+#   anthropicApiKey: "sk-ant-..."
+#   githubToken: "ghp_..."
+#   githubWebhookSecret: "..."
+#   slackBotToken: "xoxb-..."
+#   slackAppToken: "xapp-..."
+#   metricsToken: "..."
+secrets: {}
+
+# Persistent volumes. SQLite + workspace are stateful and must survive restart.
+persistence:
+  state:
+    storageClass: ""
+    size: 10Gi
+  workspace:
+    storageClass: ""
+    size: 50Gi
+
+service:
+  type: ClusterIP
+  port: 8080
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false  # Aegis writes /tmp/askpass scripts, /opt/aegis/skills cache
+  capabilities:
+    drop: ["ALL"]
+
+# Extra env vars (non-secret). Use this for SYNOPSIS_BIN, AEGIS_CONFIG, etc.
+extraEnv: {}
+
+# Reserve the schedule on a specific node pool if needed.
+nodeSelector: {}
+tolerations: []
+affinity: {}

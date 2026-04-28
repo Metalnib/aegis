@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  aegis:
+    image: aegis:0.1.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./aegis.config.js:/aegis/aegis.config.js:ro
+      - workspace:/workspace
+      - aegis-data:/var/lib/aegis
+    environment:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN}"
+      SLACK_APP_TOKEN: "${SLACK_APP_TOKEN}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    healthcheck:
+      test: ["/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  workspace:
+  aegis-data:
