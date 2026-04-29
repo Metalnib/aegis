@@ -71,16 +71,28 @@ export class Queue {
     return { id, ref, enqueuedAt: new Date(now), attempts: 0 };
   }
 
-  claim(maxAttempts: number): ReviewJob | null {
+  /**
+   * Claim the next pending job. `excludeRepoFqns` are repo identifiers
+   * (`host/owner/repo`) that must be skipped, used by the worker loop to
+   * enforce per-repo serialization: jobs for a repo already in flight do
+   * not get a second worker.
+   */
+  claim(maxAttempts: number, excludeRepoFqns?: ReadonlyArray<string>): ReviewJob | null {
     const now = new Date().toISOString();
-    const row = this.db.prepare(`
+    const exclude = excludeRepoFqns && excludeRepoFqns.length > 0 ? excludeRepoFqns : null;
+    const placeholders = exclude ? exclude.map(() => "?").join(",") : "";
+    const sql = `
       SELECT * FROM review_jobs
       WHERE status = 'pending'
         AND attempts < ?
         AND (not_before IS NULL OR not_before <= ?)
+        ${exclude ? `AND (host || '/' || owner || '/' || repo) NOT IN (${placeholders})` : ""}
       ORDER BY enqueued_at ASC
       LIMIT 1
-    `).get(maxAttempts, now) as RawRow | undefined;
+    `;
+    const params: (string | number)[] = [maxAttempts, now];
+    if (exclude) params.push(...exclude);
+    const row = this.db.prepare(sql).get(...params) as RawRow | undefined;
 
     if (!row) return null;
 

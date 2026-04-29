@@ -363,18 +363,32 @@ function startWorkerLoop(
 ): WorkerLoopHandle {
   let running = 0;
   let stopped = false;
+  /**
+   * Per-repo serialization (ARCHITECTURE.md): jobs for a repo already in
+   * flight do not get a second worker. Different repos still run in
+   * parallel up to `agent.concurrency`. The set holds `host/owner/repo`
+   * fqns; matching values are passed to `queue.claim` to skip those repos.
+   */
+  const inflightRepos = new Set<string>();
 
   const tick = () => {
     if (stopped) return;
     const cfg = configStore.get();
     const maxAttempts = cfg.queue.retries + 1;
     while (running < cfg.agent.concurrency) {
-      const job = queue.claim(maxAttempts);
+      const exclude = [...inflightRepos];
+      const job = queue.claim(maxAttempts, exclude);
       if (!job) break;
 
+      const repoFqn = `${job.ref.host}/${job.ref.owner}/${job.ref.repo}`;
+      inflightRepos.add(repoFqn);
       running++;
       void processJob(job, queue, worker, gitSync, bus, metrics, configStore, liveCodeHosts, liveChats, logger)
-        .finally(() => { running--; tick(); });
+        .finally(() => {
+          inflightRepos.delete(repoFqn);
+          running--;
+          tick();
+        });
     }
   };
 
