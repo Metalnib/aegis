@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { ChatCommand, ChatAdapter, CommandPermission, PrRef } from "@aegis/sdk";
-import type { Queue, AegisConfig } from "@aegis/core";
+import type { Queue, AegisConfig, ConfigStore } from "@aegis/core";
 import type { AgentWorker, SynopsisMcpClient } from "@aegis/agent";
 import { QueryTimeoutError } from "@aegis/agent";
 import type { Logger } from "@aegis/sdk";
@@ -11,6 +11,7 @@ export interface CommandRouterDeps {
   worker: AgentWorker;
   cfg: AegisConfig;
   logger: Logger;
+  configStore: ConfigStore;
 }
 
 // ── Permission requirements per verb ─────────────────────────────────────────
@@ -35,6 +36,7 @@ const COMMAND_PERMISSIONS: Record<string, CommandPermission> = {
   dlq: "member",
   requeue: "admin",
   cancel: "admin",
+  reload: "admin",
 };
 
 const PERMISSION_ORDER: CommandPermission[] = ["public", "member", "admin"];
@@ -83,6 +85,7 @@ export class CommandRouter {
         case "dlq":       return await this.handleDlqList(cmd, chat);
         case "requeue":   return await this.handleRequeue(rest[0] ?? "", cmd, chat);
         case "cancel":    return await this.handleCancel(rest[0] ?? "", cmd, chat);
+        case "reload":    return await this.handleReload(cmd, chat);
         case "help":      return await this.handleHelp(cmd, chat);
         default:
           await chat.reply(cmd, { text: `Unknown command: \`${verb}\`. Try \`help\`.` });
@@ -314,13 +317,44 @@ export class CommandRouter {
     const { worker } = this.deps;
     const providers = worker.getAvailableProviders();
     const info = worker.getModelInfo();
-    const lines = [
-      `Available providers (${providers.length}):`,
-      ...providers.map(p => `  ${p === info.provider ? "* " : "  "}${p}`),
-      "",
-      `* = active provider  |  current model: ${info.provider} / ${info.modelId}`,
-    ];
+    const lines = [`Available providers (${providers.length}):`];
+    for (const p of providers) {
+      const marker = p.name === info.provider ? "*" : " ";
+      const tag = p.kind === "custom" ? " [custom]" : "";
+      lines.push(`  ${marker} ${p.name}${tag}`);
+    }
+    lines.push("", `* = active provider  |  current model: ${info.provider} / ${info.modelId}`);
     await chat.reply(cmd, { text: lines.join("\n") });
+  }
+
+  private async handleReload(cmd: ChatCommand, chat: ChatAdapter): Promise<void> {
+    const { configStore, logger } = this.deps;
+    const userPerm = chat.getUserPermission?.(cmd.user.id) ?? "public";
+    if (!meetsPermission(userPerm, "admin")) {
+      await chat.reply(cmd, { text: "Sorry, `reload` is `admin`-only." });
+      return;
+    }
+    logger.info(`[router] /reload requested by user ${cmd.user.id}`);
+    const outcome = await configStore.reload("manual");
+    let reply: string;
+    switch (outcome.kind) {
+      case "applied":
+        reply = `Reload applied. Fields: [${outcome.appliedFields.join(", ") || "none"}]. Adapters: [${outcome.changedAdapters.join(", ") || "none"}].`;
+        break;
+      case "no-changes":
+        reply = "Reload completed - no changes detected.";
+        break;
+      case "tier3-refused":
+        reply = `Reload refused, restart required to apply: ${outcome.reason}`;
+        break;
+      case "validation-error":
+        reply = `Reload failed validation, keeping previous config. ${outcome.error}`;
+        break;
+      case "load-error":
+        reply = `Reload failed to load config, keeping previous config. ${outcome.error}`;
+        break;
+    }
+    await chat.reply(cmd, { text: reply });
   }
 
   private async handleDlqList(cmd: ChatCommand, chat: ChatAdapter): Promise<void> {
@@ -394,6 +428,7 @@ export class CommandRouter {
       "  cancel <job-id>            Permanently drop a DLQ job  [admin]",
       "  watch <repo>               Start monitoring a repo  [admin]",
       "  unwatch <repo>             Stop monitoring a repo   [admin]",
+      "  reload                     Re-read aegis.config from disk  [admin]",
     ].join("\n");
     await chat.reply(cmd, { text });
   }

@@ -1,4 +1,5 @@
-import type { ChatAdapter, AdapterContext, ChatCommand, ChatBody, ChannelRef } from "@aegis/sdk";
+import type { ChatAdapter, AdapterContext, ChatCommand, ChatBody, ChannelRef, ChatSpec, SpecApplyOutcome } from "@aegis/sdk";
+import { ChatAdapterBase } from "@aegis/sdk";
 
 export interface GChatSpaceConfig {
   /** Google Chat space resource name, e.g. "spaces/AAABBB" */
@@ -8,6 +9,7 @@ export interface GChatSpaceConfig {
 }
 
 export interface GChatConfig {
+  id?: string;
   spaces: GChatSpaceConfig[];
   /** Severity levels that trigger a notification. Defaults to all. */
   notifyOn?: string[];
@@ -24,11 +26,22 @@ export function gchat(cfg: GChatConfig): ChatAdapter {
  * with Pub/Sub or HTTP endpoint configured. That is out of scope for P2 -
  * GChat is notification-only. See docs/adapters.md for the full bot setup.
  */
-export class GChatAdapter implements ChatAdapter {
-  readonly id = "gchat";
-  private webhooks = new Map<string, string>();
+export class GChatAdapter extends ChatAdapterBase {
+  readonly id: string;
+  /**
+   * Tier 3: spaces and webhookUrlEnv changes require restart because secrets
+   * are read at init() time and webhook URLs aren't re-resolvable hot.
+   */
+  protected readonly tier3SpecKeys = new Set(["spaces"]);
 
-  constructor(private readonly cfg: GChatConfig) {}
+  private webhooks = new Map<string, string>();
+  private cfg: GChatConfig & { id: string };
+
+  constructor(cfg: GChatConfig) {
+    super();
+    this.cfg = { ...cfg, id: cfg.id ?? "gchat" };
+    this.id = this.cfg.id;
+  }
 
   async init(ctx: AdapterContext): Promise<void> {
     for (const space of this.cfg.spaces) {
@@ -40,18 +53,36 @@ export class GChatAdapter implements ChatAdapter {
 
   async dispose(): Promise<void> {}
 
+  getSpec(): ChatSpec {
+    return {
+      type: "gchat",
+      id: this.id,
+      data: {
+        spaces: [...this.cfg.spaces].sort((a, b) => a.id.localeCompare(b.id)),
+        notifyOn: [...(this.cfg.notifyOn ?? [])].sort(),
+      },
+    };
+  }
+
+  async applySpec(next: ChatSpec): Promise<SpecApplyOutcome> {
+    const applied: string[] = [];
+    const failed: Array<{ key: string; reason: string }> = [];
+    if (Array.isArray(next.data.notifyOn)) {
+      this.cfg = { ...this.cfg, notifyOn: next.data.notifyOn as string[] };
+      applied.push("notifyOn");
+    }
+    return { applied, failed };
+  }
+
   onCommand(_handler: (c: ChatCommand) => void): Disposable {
-    // GChat interactive commands require App registration in Google Cloud.
-    // Commands are not supported in this adapter.
     return { [Symbol.dispose]: () => {} };
   }
 
-  getUserPermission(_userId: string): "public" | "member" | "admin" {
+  override getUserPermission(_userId: string): "public" | "member" | "admin" {
     return "public";
   }
 
   async reply(cmd: ChatCommand, body: ChatBody): Promise<void> {
-    // No thread tracking without a full GChat bot setup - post to the space.
     await this.notify(cmd.channel, body);
   }
 

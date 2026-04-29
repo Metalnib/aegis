@@ -29,11 +29,31 @@ export default defineConfig({
 
   // LLM agent.
   agent: {
-    provider: "anthropic",
+    provider: "anthropic",                 // matches a customProviders key OR a built-in Pi provider
     model: "claude-opus-4-7",
     concurrency: 4,
-    // Timeout for a single PR review end-to-end.
     jobTimeoutSec: 600,
+    providerLimits: {
+      // Per-provider semaphore caps. Lower than `concurrency` for stricter rate-limited APIs.
+      anthropic: { concurrency: 4 },
+      vultr:     { concurrency: 8 },
+    },
+    // Custom OpenAI-compatible endpoints. Add as many as you want; each becomes
+    // a switchable provider via chat (`/model <name> <model-id>`). Anything not
+    // listed here falls through to Pi's built-in registry (anthropic, openai, ...).
+    customProviders: {
+      vultr: {
+        baseUrl: "https://api.vultrinference.com/v1",
+        apiKeyEnv: "VULTR_API_KEY",
+        api: "openai-completions",
+        contextWindow: 131072,
+        maxTokens: 32768,
+      },
+      "local-ollama": {
+        baseUrl: "http://localhost:11434/v1",
+        contextWindow: 8192,
+      },
+    },
   },
 
   // Code host adapters (one or more).
@@ -63,7 +83,6 @@ export default defineConfig({
   ],
 
   // Which skills to load into the agent.
-  // Order is significant: soul skill runs first.
   skills: [
     "dotnet-techne-cross-repo-impact",
     "dotnet-techne-code-review",
@@ -71,7 +90,6 @@ export default defineConfig({
     "dotnet-techne-synopsis",
   ],
 
-  // Advanced (all optional).
   queue: {
     retries: 3,
     backoff: "exponential",
@@ -81,26 +99,100 @@ export default defineConfig({
     level: "info",
     format: "json",
   },
+  http: {
+    port: 8080,
+    bindAddr: "0.0.0.0",
+    metricsTokenEnv: "METRICS_TOKEN",
+  },
 });
 ```
 
+## Configuration reload (what works without restart)
+
+Aegis watches the config file and reapplies changes on the fly. Three triggers
+are supported:
+
+1. **File watch.** `fs.watchFile` polls the config path every 2 seconds. Edits
+   from `kubectl edit configmap` or a mounted volume take effect within a few
+   seconds (debounced 2.5s to absorb k8s atomic-swap double-events).
+2. **SIGHUP.** `kill -HUP <pid>` (or `kubectl exec -- kill -HUP 1`) triggers an
+   immediate reload.
+3. **Chat command.** `@aegis reload` (admin-only) triggers a reload from chat.
+
+Each reload is serialized (one at a time, never overlapping). The outcome is
+logged, posted to the dashboard, and posted to the ops chat channel
+(`queue.dlqChannel`) on failure or refusal.
+
+### Reload tiers
+
+Each field is classified by what kind of change it can absorb at runtime.
+
+| Field | Tier | Hot-reloadable | Notes |
+|---|---|---|---|
+| `agent.provider` | 1 | Yes | New default applies to next job; in-flight jobs finish on the old model. |
+| `agent.model` | 1 | Yes | Same as above. |
+| `agent.concurrency` | 1 | Yes | New cap applies to next job; in-flight jobs hold their permit. |
+| `agent.jobTimeoutSec` | 1 | Yes | Applies to next job. |
+| `agent.providerLimits` | 1 | Yes | Per-provider semaphore caps regenerated. |
+| `agent.customProviders` | 1 | Yes | Add/remove/modify providers freely. If a removed provider is the active one (via persisted override), the override is dropped, ops chat is notified, and Aegis falls back to `agent.provider/model`. |
+| `skills` | 1 | Yes | New jobs see the new prompt; in-flight jobs keep the prompt they started with. |
+| `logging.level` | 1 | Yes | Applies immediately to all new log lines. |
+| `logging.format` | 3 | No | Format is captured at logger construction. |
+| `queue.retries` | 1 | Yes | Read fresh on each tick. |
+| `queue.backoff` | 1 | Yes | Read on each retry calculation. |
+| `queue.dlqChannel` | 1 | Yes | Notifications use the latest channel name. |
+| `codeHosts[*].repos` | 1 | Yes | Adds start polling on the next interval. Removes stop polling immediately and drop matching webhook events. **In-flight jobs run to completion.** Pending queued jobs for removed repos are not cancelled (they will retry until the queue retry budget is exhausted, then DLQ). |
+| `codeHosts[*].pollIntervalSec` | 1 | Yes | Applies to the next scheduled poll cycle. |
+| `codeHosts[*].host` | 3 | No | Changes the API endpoint and Octokit instance. |
+| `codeHosts[*].org` / `group` | 3 | No | Different scope; would re-scope every API call. |
+| `codeHosts[*].tokenEnv` | 3 | No | Auth identity. |
+| `codeHosts[*].webhookSecretEnv` | 3 | No | Webhook secret captured at init. |
+| `codeHosts[*].webhookPath` | 3 | No | Webhook routes registered with HttpServer at startup. |
+| Adapter add/remove (`codeHosts[]` length change) | 3 | No | New instances need init() with secrets and store. |
+| `chats[*].channels` | 1 | Yes | Notifications use the latest channels. |
+| `chats[*].notifyOn` | 1 | Yes | Severity filter applied next event. |
+| `chats[*].permissions` | 1 | Yes | Applies to next command. |
+| `chats[*].socketMode` / `*TokenEnv` / `signingSecretEnv` | 3 | No | Slack App connection captured at init. |
+| `chats[*].spaces` (gchat) | 3 | No | Webhook URLs captured at init from secrets. |
+| `http.port` / `http.bindAddr` | 3 | No | Socket binding. |
+| `http.metricsTokenEnv` | 3 | No | Bearer token captured at HttpServer construction. |
+| `workspace` | 3 | No | Filesystem identity for cloned repos. |
+| `dbPath` | 3 | No | SQLite handle. |
+| `synopsis.path` / `synopsis.transport` | 3 | No | Daemon connection. |
+| `skillsDir` / `soulPath` | 3 | No | Captured at SkillLoader construction. |
+
+When a Tier 3 field changes, the reload is **refused as a whole** and the
+previous config keeps running. The dashboard shows a yellow "Restart required"
+banner with the affected fields. The ops chat channel gets a one-line notice.
+The operator restarts when ready - no work is lost (queue is durable).
+
+When a reload **fails validation** (Zod schema rejects the new file), the
+previous config keeps running. The error is logged and posted to ops chat.
+
+### What does NOT survive reload
+
+A pre-existing model override saved via `@aegis model <vultr> ...` will be
+**dropped** if the next config no longer defines a `vultr` customProvider.
+The dashboard shows the active model; ops chat gets a notice.
+
+### Tier 3 will be supported later
+
+Adding/removing whole adapters and changing process-bound resources (port,
+dbPath, etc.) is out of scope for the current release. Restart is the
+documented path. See ADR `0015-config-hot-reload.md`.
+
 ## Validation
 
-At startup, `@aegis/core`:
+At startup and on every reload, `@aegis/core`:
 
-1. Loads the file via a TS loader (tsx / esbuild).
+1. Loads the file via Node's `require` cache (cleared between reloads).
 2. Parses into a Zod schema.
 3. Fails-fast with precise error messages on invalid config.
-4. Verifies every referenced env var is present (empty string → fail).
-5. Verifies every skill name corresponds to a skill in
-   `/opt/aegis/skills/`.
-6. Smoke-tests adapter init (dry-run), so an expired token surfaces at
-   boot, not at first event.
 
 CLI:
 
 ```
-aegis config validate [--file /etc/aegis/aegis.config.js]
+aegis config validate [aegis.config.js]
 ```
 
 ## Default values
@@ -114,34 +206,51 @@ aegis config validate [--file /etc/aegis/aegis.config.js]
 | `agent.model` | `claude-opus-4-7` |
 | `agent.concurrency` | `4` |
 | `agent.jobTimeoutSec` | `600` |
+| `agent.customProviders` | `{}` |
 | `queue.retries` | `3` |
 | `queue.backoff` | `exponential` |
 | `logging.level` | `info` |
 | `logging.format` | `json` |
 
-## Adapter-specific options
+## Custom providers (OpenAI-compatible endpoints)
 
-See each adapter's README. Common shape:
+Anything that speaks the OpenAI Chat Completions wire format can be plugged in:
+Vultr, OpenRouter, local Ollama, an enterprise Azure OpenAI proxy, etc.
 
 ```ts
-interface CommonAdapterOptions {
-  id?: string;              // override default id (useful for multiple GitHub orgs)
-  // Any secrets are specified as env var names, not values.
-  // e.g. tokenEnv: "GITHUB_TOKEN" not token: process.env.GITHUB_TOKEN
+agent: {
+  provider: "vultr",                       // make Vultr the default
+  model: "llama-3.3-70b-instruct-fp8",
+  customProviders: {
+    vultr: {
+      baseUrl: "https://api.vultrinference.com/v1",
+      apiKeyEnv: "VULTR_API_KEY",
+      api: "openai-completions",           // default; alternatives: openai-responses, anthropic-messages, ...
+      reasoning: false,                     // set true if the model exposes reasoning tokens
+      vision: false,                        // set true for multimodal input
+      contextWindow: 131072,
+      maxTokens: 32768,
+    },
+  },
 }
 ```
 
-## Hot reload
+Switching at runtime via chat:
 
-Not supported in MVP. Config changes require a container restart.
+```
+@aegis providers
+@aegis model vultr llama-3.1-405b-instruct
+@aegis model anthropic claude-opus-4-7
+@aegis model reset
+```
 
-Rationale: simplicity + SQLite state continuity. A stop-the-world reload
-in a single-container deployment is fine; the queue is durable, so in-flight
-jobs resume automatically.
+The override persists in SQLite. On reload of a config that no longer defines
+the active custom provider, the override is dropped (see "What does NOT
+survive reload" above).
 
 ## Multiple instances of the same adapter
 
-Supported — each instance needs a unique `id`:
+Supported - each instance needs a unique `id`:
 
 ```ts
 codeHosts: [
@@ -150,26 +259,32 @@ codeHosts: [
 ],
 ```
 
-Events from each carry the adapter `id`, so reviews always round-trip to
-the same host.
+Events from each carry the adapter `id`. The reload diff matches by `id`, so
+renaming an adapter (`id` change) is treated as remove + add, which is Tier 3.
 
 ## Configuration file location
 
 - Dev: `./aegis.config.ts` at repo root.
-- Docker: `AEGIS_CONFIG` env var points to a mounted JS file
-  (default `/etc/aegis/aegis.config.js`). Mount the **compiled** file so
-  the container doesn't need a TS loader.
+- Docker: pass the path as the first argument: `aegis serve /opt/aegis/aegis.config.js`.
+  The Helm chart mounts the ConfigMap at `/opt/aegis/aegis.config.js` by default.
+  Mount the **compiled** file so the container doesn't need a TS loader.
 
 ## Secrets
 
-See [DEPLOYMENT.md](DEPLOYMENT.md#environment-variables-mvp) for the env-var
-contract. MVP is env-var-based; post-MVP adds Docker secrets / k8s secrets
-via the same `SecretsProvider` interface. No changes to `aegis.config.ts`
-are needed — `tokenEnv: "GITHUB_TOKEN"` still reads from wherever the
-provider looks.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the env-var contract. The `EnvSecrets`
+provider supports both direct env vars and the 12-factor `${KEY}_FILE`
+indirection used by Docker secrets and k8s file-mounted secrets.
 
-## Config versioning
+> Caveat: file-mounted secrets are cached per-process. Rotating a secret
+> requires a pod restart even though the config supports hot reload. Aegis logs
+> a one-time notice the first time a `_FILE` secret is read.
 
-The top-level `defineConfig` result carries an implicit version. When we
-introduce a breaking config change, `defineConfig` will gain a
-`schemaVersion` field, and Aegis will print a migration hint on startup.
+## Adapter-specific options
+
+See each adapter's README. Common shape:
+
+```ts
+interface CommonAdapterOptions {
+  id?: string;              // override default id
+}
+```

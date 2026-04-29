@@ -35,6 +35,14 @@ command router sees just `<verb> [args]`.
 | `rescan <repo>` | Force a Synopsis re-index of one repo | `@aegis rescan svc-a` |
 | `watch <repo>` | Start monitoring a repo (runtime, not config) | `@aegis watch myorg/svc-d` |
 | `unwatch <repo>` | Stop monitoring | `@aegis unwatch myorg/svc-d` |
+| `model` | Show the active LLM model and config default | `@aegis model` |
+| `model <provider> <id>` | Switch the LLM at runtime (admin) | `@aegis model vultr llama-3.3-70b-instruct-fp8` |
+| `model reset` | Revert to the model in `aegis.config.ts` | `@aegis model reset` |
+| `providers` | List available LLM providers (built-in + custom) | `@aegis providers` |
+| `dlq` | List dead-letter queue jobs (member) | `@aegis dlq` |
+| `requeue <job-id>` | Move a DLQ job back to pending (admin) | `@aegis requeue 1a2b3c4d` |
+| `cancel <job-id>` | Permanently drop a DLQ job (admin) | `@aegis cancel 1a2b3c4d` |
+| `reload` | Re-read `aegis.config` from disk and apply Tier 1+2 changes (admin) | `@aegis reload` |
 
 ## Post-MVP ideas (P4+)
 
@@ -60,8 +68,9 @@ Default matrix:
 | Command | Level |
 |---|---|
 | `help`, `status`, `repos`, `impact`, `paths`, `endpoints`, `callers`, `db`, `ambiguous`, `explain` | `public` |
-| `review`, `rescan` | `member` |
-| `watch`, `unwatch` | `admin` |
+| `review`, `rescan`, `dlq` | `member` |
+| `watch`, `unwatch`, `requeue`, `cancel`, `reload`, `model <set>` | `admin` |
+| `model <show>`, `providers` | `public` |
 
 Allowlists live in `aegis.config.ts`:
 

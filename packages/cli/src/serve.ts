@@ -3,15 +3,25 @@ import { mkdir } from "node:fs/promises";
 import {
   EventBus, Queue, Supervisor, GitSync, HttpServer, Metrics,
   loadConfig, EnvSecrets, SqliteKvStore, createLogger,
-  renderDashboard,
+  renderDashboard, ConfigStore,
   type AegisConfig,
 } from "@aegis/core";
 import { AgentWorker, SkillLoader, SynopsisMcpClient } from "@aegis/agent";
-import type { CodeHostAdapter, ChatAdapter, PrEvent, AegisReview, ReviewJob, Logger, WebhookEndpoint, RepoEntry } from "@aegis/sdk";
+import type {
+  CodeHostAdapter, ChatAdapter, PrEvent, AegisReview, ReviewJob, Logger,
+  WebhookEndpoint, RepoEntry, CodeHostSpec, ChatSpec,
+} from "@aegis/sdk";
 import { AegisAdapterError } from "@aegis/sdk";
 import { CommandRouter } from "./command-router.js";
 
-export async function serve(rawConfig: unknown): Promise<void> {
+export interface ServeOptions {
+  /** Absolute path to the config file. Used for fs.watchFile. */
+  configPath: string;
+  /** Cache-busting loader. Returns the fresh raw config object on every call. */
+  loader: () => unknown;
+}
+
+export async function serve(rawConfig: unknown, opts: ServeOptions): Promise<void> {
   const cfg = loadConfig(rawConfig) as AegisConfig;
   const logger = createLogger(cfg.logging.level, cfg.logging.format);
   const secrets = new EnvSecrets(logger);
@@ -48,6 +58,12 @@ export async function serve(rawConfig: unknown): Promise<void> {
   }
   const systemStore = new SqliteKvStore(queue.db_instance(), reservedNs);
 
+  // Live adapter instances. These survive config reload; their internal
+  // state is updated via applySpec when the config changes. The configStore
+  // tracks the "data" snapshot for non-adapter fields (agent, queue, etc.).
+  const liveCodeHosts: CodeHostAdapter[] = cfg.codeHosts;
+  const liveChats: ChatAdapter[] = cfg.chats;
+
   const skillLoader = new SkillLoader(cfg.skillsDir);
   const worker = new AgentWorker({
     config: cfg.agent,
@@ -69,11 +85,11 @@ export async function serve(rawConfig: unknown): Promise<void> {
     emit: (e: import("@aegis/sdk").BusEvent) => bus.emit(e),
   });
 
-  for (const host of cfg.codeHosts) {
+  for (const host of liveCodeHosts) {
     await host.init(adapterCtx(host));
   }
 
-  for (const host of cfg.codeHosts) {
+  for (const host of liveCodeHosts) {
     const list = host.listRepos?.();
     if (!list) continue;
     const summary = list.map((e: RepoEntry) => e.source === "dynamic" ? `${e.name}*` : e.name).join(", ");
@@ -85,9 +101,25 @@ export async function serve(rawConfig: unknown): Promise<void> {
   metrics.gaugeProvider("aegis_queue_running", "Jobs currently being processed", () => queue.stats().running);
   metrics.gaugeProvider("aegis_queue_dlq", "Jobs in the dead-letter queue", () => queue.stats().dlq);
 
-  const commandRouter = new CommandRouter({ queue, mcp, worker, cfg, logger });
+  // ConfigStore: single source of truth for the live config snapshot. Also
+  // owns file-watch + SIGHUP. The /reload command in CommandRouter calls into it.
+  const configStore = new ConfigStore({
+    configPath: opts.configPath,
+    loader: opts.loader,
+    initial: cfg,
+    logger,
+    notifyOps: async (text) => {
+      const channel = configStore.get().queue.dlqChannel;
+      if (!channel) return;
+      for (const chat of liveChats) {
+        await chat.notify({ id: channel }, { text }).catch(() => {});
+      }
+    },
+  });
 
-  for (const chat of cfg.chats) {
+  const commandRouter = new CommandRouter({ queue, mcp, worker, cfg, logger, configStore });
+
+  for (const chat of liveChats) {
     await chat.init({
       logger,
       secrets,
@@ -105,6 +137,44 @@ export async function serve(rawConfig: unknown): Promise<void> {
     });
   }
 
+  // Wire ConfigStore subscriber to dispatch hot-reload changes into live
+  // components. This MUST run before startWatching() so the first
+  // file-driven reload doesn't fire into an empty subscriber list.
+  configStore.subscribe(async (change, _oldCfg, newCfg) => {
+    if (change.loggingChanged) {
+      logger.setLevel?.(newCfg.logging.level);
+      logger.info(`[aegis] log level changed to ${newCfg.logging.level}`);
+    }
+    if (change.agentChanged) {
+      const result = await worker.applyConfig(newCfg.agent);
+      logger.info(`[aegis] agent config applied: [${result.applied.join(",")}]`);
+      if (result.droppedOverride) {
+        const channel = newCfg.queue.dlqChannel;
+        if (channel) {
+          const text = `Aegis dropped saved model override ${result.droppedOverride.provider}/${result.droppedOverride.modelId}: ${result.droppedOverride.reason}. Reverted to default ${newCfg.agent.provider}/${newCfg.agent.model}.`;
+          for (const chat of liveChats) await chat.notify({ id: channel }, { text }).catch(() => {});
+        }
+      }
+    }
+    if (change.skillsChanged) {
+      await worker.reloadSkills(newCfg.skills);
+    }
+    for (const [id, spec] of change.codeHostSpecs) {
+      const live = liveCodeHosts.find(a => a.id === id);
+      if (!live) continue;
+      const aware = live as unknown as { applySpec?: (s: CodeHostSpec) => Promise<unknown> };
+      if (aware.applySpec) await aware.applySpec(spec);
+    }
+    for (const [id, spec] of change.chatSpecs) {
+      const live = liveChats.find(a => a.id === id);
+      if (!live) continue;
+      const aware = live as unknown as { applySpec?: (s: ChatSpec) => Promise<unknown> };
+      if (aware.applySpec) await aware.applySpec(spec);
+    }
+  });
+
+  configStore.startWatching();
+
   supervisor.start();
 
   const recovered = queue.recoverOrphaned();
@@ -112,21 +182,19 @@ export async function serve(rawConfig: unknown): Promise<void> {
     logger.warn(`[aegis] recovered ${recovered} job(s) left in 'running' from a previous run`);
   }
 
-  const subscribers = subscribeWebhookEnqueue(cfg.codeHosts, queue, bus, metrics, logger);
-  const polling = startPolling(cfg.codeHosts, queue, bus, metrics, logger);
-  const workerLoop = startWorkerLoop(queue, worker, gitSync, bus, metrics, cfg, logger);
-  notifyOnReview(bus, cfg, logger);
+  const subscribers = subscribeWebhookEnqueue(liveCodeHosts, queue, bus, metrics, logger);
+  const polling = startPolling(liveCodeHosts, configStore, queue, bus, metrics, logger);
+  const workerLoop = startWorkerLoop(queue, worker, gitSync, bus, metrics, configStore, liveCodeHosts, liveChats, logger);
+  notifyOnReview(bus, configStore, liveChats, logger);
 
-  const httpServer = await maybeStartHttpServer(cfg, secrets, metrics, queue, worker, logger);
+  const httpServer = await maybeStartHttpServer(cfg, secrets, metrics, queue, worker, configStore, liveCodeHosts, logger);
 
   logger.info("[aegis] running");
 
   await waitForShutdown(async () => {
     logger.info("[aegis] shutting down");
-    // Stop intake first: webhook clients get clean failures and will retry,
-    // rather than 200-OK with the event silently dropped after subscribers
-    // are disposed.
     if (httpServer) await httpServer.stop().catch((err) => logger.warn("[aegis] http stop failed", err));
+    configStore.stop();
     polling.stop();
     workerLoop.stop();
     for (const d of subscribers) d[Symbol.dispose]();
@@ -135,8 +203,8 @@ export async function serve(rawConfig: unknown): Promise<void> {
     });
     supervisor.stop();
     mcp.disconnect();
-    for (const host of cfg.codeHosts) await host.dispose();
-    for (const chat of cfg.chats) await chat.dispose();
+    for (const host of liveCodeHosts) await host.dispose();
+    for (const chat of liveChats) await chat.dispose();
   });
 }
 
@@ -146,12 +214,14 @@ async function maybeStartHttpServer(
   metrics: Metrics,
   queue: Queue,
   worker: AgentWorker,
+  configStore: ConfigStore,
+  liveCodeHosts: CodeHostAdapter[],
   logger: Logger,
 ): Promise<HttpServer | null> {
   if (!cfg.http) return null;
 
   const webhookRoutes = new Map<string, WebhookEndpoint>();
-  for (const host of cfg.codeHosts) {
+  for (const host of liveCodeHosts) {
     if (!host.webhook) continue;
     if (webhookRoutes.has(host.webhook.path)) {
       throw new Error(`webhook path collision: "${host.webhook.path}" is claimed by multiple adapters`);
@@ -164,9 +234,10 @@ async function maybeStartHttpServer(
     generatedAt: new Date(),
     model: worker.getModelInfo(),
     queue: queue.stats(),
-    adapters: cfg.codeHosts.map(h => ({ id: h.id, host: hostFor(h), repos: h.listRepos?.() ?? [] })),
+    adapters: liveCodeHosts.map(h => ({ id: h.id, host: hostFor(h), repos: h.listRepos?.() ?? [] })),
     dlq: queue.listDlq(50),
     audit: queue.recentAudit(50),
+    reload: configStore.getStatus(),
   });
 
   const server = new HttpServer({
@@ -182,12 +253,12 @@ async function maybeStartHttpServer(
   return server;
 }
 
-/**
- * Best-effort host string for the dashboard (e.g. github.com / gitlab.com).
- * Adapters don't expose this directly; we read it from the first watched ref
- * or fall back to the adapter id.
- */
 function hostFor(host: CodeHostAdapter): string {
+  const aware = host as unknown as { getSpec?: () => { data?: { host?: string } } };
+  if (typeof aware.getSpec === "function") {
+    const spec = aware.getSpec();
+    if (spec.data?.host) return spec.data.host;
+  }
   const cfg = (host as unknown as { cfg?: { host?: string } }).cfg;
   return cfg?.host ?? host.id;
 }
@@ -219,8 +290,11 @@ function subscribeWebhookEnqueue(
 
 interface PollingHandle { stop(): void }
 
-function startPolling(hosts: CodeHostAdapter[], queue: Queue, bus: EventBus, metrics: Metrics, logger: Logger): PollingHandle {
-  const intervals: NodeJS.Timeout[] = [];
+function startPolling(hosts: CodeHostAdapter[], configStore: ConfigStore, queue: Queue, bus: EventBus, metrics: Metrics, logger: Logger): PollingHandle {
+  // Each adapter polls on its own schedule. The interval is read fresh from the
+  // adapter's getSpec() each tick so a hot-reloaded pollIntervalSec takes effect
+  // on the next iteration.
+  const timeouts = new Map<string, NodeJS.Timeout>();
   let stopped = false;
 
   for (const host of hosts) {
@@ -243,19 +317,32 @@ function startPolling(hosts: CodeHostAdapter[], queue: Queue, bus: EventBus, met
         logger.error(`[aegis] poll error from ${host.id}`, err);
       } finally {
         inflight = false;
+        if (stopped) return;
+        const intervalSec = readPollInterval(host) ?? 60;
+        timeouts.set(host.id, setTimeout(() => void poll(), intervalSec * 1000));
       }
     };
-
     void poll();
-    intervals.push(setInterval(() => void poll(), 60_000));
   }
+
+  // Suppress unused param warning - configStore reserved for future per-host overrides.
+  void configStore;
 
   return {
     stop: () => {
       stopped = true;
-      for (const i of intervals) clearInterval(i);
+      for (const t of timeouts.values()) clearTimeout(t);
     },
   };
+}
+
+function readPollInterval(host: CodeHostAdapter): number | null {
+  const aware = host as unknown as { getSpec?: () => { data?: { pollIntervalSec?: number } } };
+  if (typeof aware.getSpec === "function") {
+    const spec = aware.getSpec();
+    if (typeof spec.data?.pollIntervalSec === "number") return spec.data.pollIntervalSec;
+  }
+  return null;
 }
 
 interface WorkerLoopHandle {
@@ -269,21 +356,24 @@ function startWorkerLoop(
   gitSync: GitSync,
   bus: EventBus,
   metrics: Metrics,
-  cfg: AegisConfig,
+  configStore: ConfigStore,
+  liveCodeHosts: CodeHostAdapter[],
+  liveChats: ChatAdapter[],
   logger: Logger,
 ): WorkerLoopHandle {
-  const maxAttempts = cfg.queue.retries + 1;
   let running = 0;
   let stopped = false;
 
   const tick = () => {
     if (stopped) return;
+    const cfg = configStore.get();
+    const maxAttempts = cfg.queue.retries + 1;
     while (running < cfg.agent.concurrency) {
       const job = queue.claim(maxAttempts);
       if (!job) break;
 
       running++;
-      void processJob(job, queue, worker, gitSync, bus, metrics, cfg, logger)
+      void processJob(job, queue, worker, gitSync, bus, metrics, configStore, liveCodeHosts, liveChats, logger)
         .finally(() => { running--; tick(); });
     }
   };
@@ -320,14 +410,16 @@ async function processJob(
   gitSync: GitSync,
   bus: EventBus,
   metrics: Metrics,
-  cfg: AegisConfig,
+  configStore: ConfigStore,
+  liveCodeHosts: CodeHostAdapter[],
+  liveChats: ChatAdapter[],
   logger: Logger,
 ): Promise<void> {
   const { ref } = job;
   logger.info(`[worker] processing ${ref.owner}/${ref.repo}#${ref.number}`, { jobId: job.id });
 
   try {
-    const host = cfg.codeHosts.find(h => h.id === ref.host) ?? cfg.codeHosts.find(h => ref.host.includes(h.id));
+    const host = liveCodeHosts.find(h => h.id === ref.host) ?? liveCodeHosts.find(h => ref.host.includes(h.id));
     if (!host) throw new Error(`No adapter for host ${ref.host}`);
 
     const diff = await host.fetchDiff(ref);
@@ -351,10 +443,8 @@ async function processJob(
     bus.emit({ kind: "review-done", jobId: job.id, ref, review });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const cfg = configStore.get();
 
-    // Adaptive 429 backoff: defer the job without consuming a retry, but
-    // DLQ after too many consecutive defers so a broken upstream can't cycle
-    // forever.
     if (err instanceof AegisAdapterError && err.error.kind === "rate-limited") {
       const retryAfter = err.error.retryAfterSec;
       const outcome = queue.delayRetry(job.id, retryAfter);
@@ -378,7 +468,7 @@ async function processJob(
     bus.emit({ kind: "review-failed", jobId: job.id, ref, error: message });
 
     if (outcome === "dlq" && cfg.queue.dlqChannel) {
-      for (const chat of cfg.chats) {
+      for (const chat of liveChats) {
         await chat.notify({ id: cfg.queue.dlqChannel }, {
           text: `Aegis job failed (DLQ): ${ref.owner}/${ref.repo}#${ref.number} - ${message}`,
         }).catch(() => {});
@@ -387,22 +477,27 @@ async function processJob(
   }
 }
 
-function notifyOnReview(bus: EventBus, cfg: AegisConfig, logger: Logger): void {
+function notifyOnReview(bus: EventBus, configStore: ConfigStore, liveChats: ChatAdapter[], logger: Logger): void {
   bus.subscribe(event => {
     if (event.kind !== "review-done") return;
-    notifyChats(cfg, event.review, event.ref, logger);
+    notifyChats(configStore, liveChats, event.review, event.ref, logger);
   });
 }
 
-function notifyChats(cfg: AegisConfig, review: AegisReview, ref: ReviewJob["ref"], logger: Logger): void {
-  const notifySeverities = new Set(["Critical", "High"]);
-  if (!notifySeverities.has(review.severity)) return;
-
+function notifyChats(configStore: ConfigStore, liveChats: ChatAdapter[], review: AegisReview, ref: ReviewJob["ref"], logger: Logger): void {
+  // Each chat adapter declares its own notifyOn list via getSpec(); after a
+  // hot reload, that list reflects the latest config without any restart.
+  void configStore;
   const prLabel = `${ref.owner}/${ref.repo}#${ref.number}`;
   const text = `Aegis: ${review.severity} severity review on ${prLabel} - ${review.summary.slice(0, 200)}`;
 
-  for (const chat of cfg.chats) {
-    for (const channel of getNotifyChannels(chat)) {
+  for (const chat of liveChats) {
+    const spec = readChatSpec(chat);
+    const notifyOn = spec?.data.notifyOn;
+    if (Array.isArray(notifyOn) && notifyOn.length > 0 && !notifyOn.includes(review.severity)) continue;
+
+    const channels = (spec?.data.channels as string[] | undefined) ?? [];
+    for (const channel of channels) {
       chat.notify({ id: channel }, { text }).catch((err: unknown) => {
         logger.warn("[aegis] notify failed", err);
       });
@@ -410,12 +505,10 @@ function notifyChats(cfg: AegisConfig, review: AegisReview, ref: ReviewJob["ref"
   }
 }
 
-function getNotifyChannels(chat: AegisConfig["chats"][number]): string[] {
-  // Adapters expose their channel list via the `cfg.channels` shape but the
-  // typed AegisConfig doesn't carry adapter-specific config. Keep the cast
-  // narrow and read-only.
-  const c = chat as unknown as { cfg?: { channels?: string[] } };
-  return c.cfg?.channels ?? [];
+function readChatSpec(chat: ChatAdapter): ChatSpec | null {
+  const aware = chat as unknown as { getSpec?: () => ChatSpec };
+  if (typeof aware.getSpec === "function") return aware.getSpec();
+  return null;
 }
 
 function buildSynopsisArgs(cfg: AegisConfig): string[] {

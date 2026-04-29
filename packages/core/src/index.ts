@@ -9,8 +9,13 @@ export { HttpServer } from "./http-server.js";
 export type { HttpServerOptions } from "./http-server.js";
 export { Metrics } from "./metrics.js";
 export { Semaphore } from "./semaphore.js";
-export { loadConfig, defineConfig } from "./config.js";
+export { loadConfig, defineConfig, TIER3_TOP_LEVEL_FIELDS } from "./config.js";
 export { EnvSecrets } from "./secrets.js";
 export { SqliteKvStore } from "./kv-store.js";
 export { createLogger } from "./logger.js";
-export type { AegisConfig, CodeHostConfig, ChatConfig, QueueConfig, SynopsisConfig, AgentConfig, HttpConfig } from "./config.js";
+export { ConfigStore, computeChangeSet } from "./config-store.js";
+export type { ConfigStoreOptions, ReloadOutcome, ReloadStatus, ReloadAttempt, ReloadTrigger } from "./config-store.js";
+export type {
+  AegisConfig, CodeHostConfig, ChatConfig, QueueConfig, SynopsisConfig,
+  AgentConfig, HttpConfig, LoggingConfig, CustomProvider, ChangeSet,
+} from "./config.js";

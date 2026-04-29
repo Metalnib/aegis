@@ -3,10 +3,10 @@ import type {
   CodeHostAdapter, AdapterContext,
   PrRef, PrEvent, PrInfo, DiffBundle, FileDiff,
   AegisReview, PrSearchQuery, CloneSpec,
-  WebhookEndpoint, WebhookRequest, WebhookResponse,
-  RepoEntry,
+  WebhookRequest, WebhookResponse,
+  RepoEntry, CodeHostSpec, SpecApplyOutcome,
 } from "@aegis/sdk";
-import { AegisAdapterError } from "@aegis/sdk";
+import { AegisAdapterError, CodeHostAdapterBase } from "@aegis/sdk";
 
 export interface GitLabConfig {
   id?: string;
@@ -29,20 +29,25 @@ export function gitlab(cfg: GitLabConfig): CodeHostAdapter {
   return new GitLabAdapter(cfg);
 }
 
-export class GitLabAdapter implements CodeHostAdapter {
+export class GitLabAdapter extends CodeHostAdapterBase {
   readonly id: string;
+  protected readonly tier3SpecKeys = new Set([
+    "host", "group", "tokenEnv", "webhookSecretEnv", "webhookPath",
+  ]);
+
   private ctx!: AdapterContext;
   private token = "";
   private webhookSecret = "";
   private subscribers: Array<(e: PrEvent) => void> = [];
   private repos = new Set<string>();
-  private readonly configRepos: ReadonlySet<string>;
-  readonly webhook?: WebhookEndpoint;
-  private readonly cfg: GitLabConfig & {
+  private configRepos = new Set<string>();
+  private dynamicRepos = new Set<string>();
+  private cfg: GitLabConfig & {
     id: string; host: string; pollIntervalSec: number; tokenEnv: string;
   };
 
   constructor(cfg: GitLabConfig) {
+    super();
     this.cfg = {
       ...cfg,
       id: cfg.id ?? "gitlab",
@@ -61,6 +66,10 @@ export class GitLabAdapter implements CodeHostAdapter {
     }
   }
 
+  private recomputeRepos(): void {
+    this.repos = new Set([...this.configRepos, ...this.dynamicRepos]);
+  }
+
   async init(ctx: AdapterContext): Promise<void> {
     this.ctx = ctx;
     this.token = ctx.secrets.get(this.cfg.tokenEnv);
@@ -68,32 +77,71 @@ export class GitLabAdapter implements CodeHostAdapter {
       this.webhookSecret = ctx.secrets.get(this.cfg.webhookSecretEnv);
     }
 
-    this.repos = new Set(this.configRepos);
     const stored = await ctx.store.get(DYNAMIC_REPOS_KEY);
     if (stored) {
       try {
         const arr = JSON.parse(stored) as unknown;
         if (Array.isArray(arr)) {
-          for (const r of arr) if (typeof r === "string") this.repos.add(r);
+          for (const r of arr) if (typeof r === "string") this.dynamicRepos.add(r);
         }
       } catch (err) {
         ctx.logger.warn(`[gitlab] failed to load dynamic repos: ${(err as Error).message}`);
       }
     }
-    ctx.logger.info(`[gitlab] initialised for ${this.cfg.group} (${this.repos.size} repos: ${this.configRepos.size} config, ${this.repos.size - this.configRepos.size} dynamic)`);
+    this.recomputeRepos();
+    ctx.logger.info(`[gitlab] initialised for ${this.cfg.group} (${this.repos.size} repos: ${this.configRepos.size} config, ${this.dynamicRepos.size} dynamic)`);
   }
 
-  listRepos(): RepoEntry[] {
+  getSpec(): CodeHostSpec {
+    return {
+      type: "gitlab",
+      id: this.id,
+      data: {
+        host: this.cfg.host,
+        group: this.cfg.group,
+        repos: [...this.configRepos].sort(),
+        pollIntervalSec: this.cfg.pollIntervalSec,
+        tokenEnv: this.cfg.tokenEnv,
+        webhookSecretEnv: this.cfg.webhookSecretEnv ?? null,
+        webhookPath: this.cfg.webhookPath ?? `/webhooks/${this.id}`,
+      },
+    };
+  }
+
+  async applySpec(next: CodeHostSpec): Promise<SpecApplyOutcome> {
+    const applied: string[] = [];
+    const failed: Array<{ key: string; reason: string }> = [];
+
+    if (Array.isArray(next.data.repos)) {
+      const newConfigRepos = new Set(next.data.repos as string[]);
+      const added = [...newConfigRepos].filter(r => !this.configRepos.has(r));
+      const removed = [...this.configRepos].filter(r => !newConfigRepos.has(r));
+      this.configRepos = newConfigRepos;
+      this.recomputeRepos();
+      if (added.length > 0 || removed.length > 0) {
+        this.ctx?.logger.info(`[gitlab] config repos changed: +[${added.join(",")}] -[${removed.join(",")}]`);
+      }
+      applied.push("repos");
+    }
+
+    if (typeof next.data.pollIntervalSec === "number") {
+      this.cfg = { ...this.cfg, pollIntervalSec: next.data.pollIntervalSec };
+      applied.push("pollIntervalSec");
+    }
+
+    return { applied, failed };
+  }
+
+  override listRepos(): RepoEntry[] {
     return [...this.repos].sort().map(name => ({
       name,
       source: this.configRepos.has(name) ? "config" : "dynamic",
     }));
   }
 
-  /** Serializes addRepo/removeRepo so concurrent calls can't lose each other's writes. */
   private mutationLock: Promise<void> = Promise.resolve();
 
-  async addRepo(name: string): Promise<void> {
+  override async addRepo(name: string): Promise<void> {
     return this.serializeMutation(async () => {
       if (!REPO_NAME_RE.test(name)) throw new Error(`invalid repo name "${name}"`);
       if (this.repos.has(name)) throw new Error(`already watching ${this.cfg.group}/${name}`);
@@ -103,19 +151,21 @@ export class GitLabAdapter implements CodeHostAdapter {
       });
       if (res.status === 404) throw new Error(`${this.cfg.group}/${name} not found or token lacks access`);
       if (!res.ok) throw new Error(`Failed to verify ${this.cfg.group}/${name}: HTTP ${res.status}`);
-      this.repos.add(name);
+      this.dynamicRepos.add(name);
+      this.recomputeRepos();
       await this.persistDynamicRepos();
       this.ctx.logger.info(`[gitlab] watching ${this.cfg.group}/${name}`);
     });
   }
 
-  async removeRepo(name: string): Promise<void> {
+  override async removeRepo(name: string): Promise<void> {
     return this.serializeMutation(async () => {
-      if (this.configRepos.has(name)) {
-        throw new Error(`${name} is listed in aegis.config.ts; remove it there and restart`);
+      if (this.configRepos.has(name) && !this.dynamicRepos.has(name)) {
+        throw new Error(`${name} is listed in aegis.config.ts; remove it there (the change applies on next config reload)`);
       }
-      if (!this.repos.has(name)) throw new Error(`not watching ${this.cfg.group}/${name}`);
-      this.repos.delete(name);
+      if (!this.dynamicRepos.has(name)) throw new Error(`not watching ${this.cfg.group}/${name} dynamically`);
+      this.dynamicRepos.delete(name);
+      this.recomputeRepos();
       await this.persistDynamicRepos();
       this.ctx.logger.info(`[gitlab] unwatched ${this.cfg.group}/${name}`);
     });
@@ -130,15 +180,14 @@ export class GitLabAdapter implements CodeHostAdapter {
   }
 
   private async persistDynamicRepos(): Promise<void> {
-    const dynamic = [...this.repos].filter(r => !this.configRepos.has(r));
-    await this.ctx.store.set(DYNAMIC_REPOS_KEY, JSON.stringify(dynamic));
+    await this.ctx.store.set(DYNAMIC_REPOS_KEY, JSON.stringify([...this.dynamicRepos].sort()));
   }
 
   async dispose(): Promise<void> {
     this.subscribers = [];
   }
 
-  subscribe(handler: (e: PrEvent) => void): Disposable {
+  override subscribe(handler: (e: PrEvent) => void): Disposable {
     this.subscribers.push(handler);
     return {
       [Symbol.dispose]: () => {

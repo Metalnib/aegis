@@ -4,10 +4,10 @@ import type {
   CodeHostAdapter, AdapterContext,
   PrRef, PrEvent, PrInfo, DiffBundle, FileDiff,
   AegisReview, PrSearchQuery, CloneSpec,
-  WebhookEndpoint, WebhookRequest, WebhookResponse,
-  RepoEntry,
+  WebhookRequest, WebhookResponse,
+  RepoEntry, CodeHostSpec, SpecApplyOutcome,
 } from "@aegis/sdk";
-import { AegisAdapterError } from "@aegis/sdk";
+import { AegisAdapterError, CodeHostAdapterBase } from "@aegis/sdk";
 
 export interface GitHubConfig {
   id?: string;
@@ -31,23 +31,33 @@ export function github(cfg: GitHubConfig): CodeHostAdapter {
 const REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 const DYNAMIC_REPOS_KEY = "repos:dynamic";
 
-export class GitHubAdapter implements CodeHostAdapter {
+export class GitHubAdapter extends CodeHostAdapterBase {
   readonly id: string;
+  /**
+   * Tier 3 spec keys: changing any of these requires a process restart. They
+   * touch authentication identity, the HTTP route table, or the API endpoint.
+   */
+  protected readonly tier3SpecKeys = new Set([
+    "host", "org", "tokenEnv", "webhookSecretEnv", "webhookPath",
+  ]);
+
   private octokit!: Octokit;
   private ctx!: AdapterContext;
   private token = "";
   private webhookSecret = "";
   private subscribers: Array<(e: PrEvent) => void> = [];
-  /** Live repo set (config + dynamic). Mutated by addRepo/removeRepo. */
+  /** Live repo set (configRepos union dynamicRepos). Recomputed after any change. */
   private repos = new Set<string>();
-  /** Repos listed in the static config. Immutable; chat unwatch can't remove these. */
-  private readonly configRepos: ReadonlySet<string>;
-  readonly webhook?: WebhookEndpoint;
-  private readonly cfg: GitHubConfig & {
+  /** Repos listed in the latest reload of aegis.config.ts. Mutated by applySpec. */
+  private configRepos = new Set<string>();
+  /** Repos added at runtime via chat. Mutated by addRepo/removeRepo. Persisted in KV. */
+  private dynamicRepos = new Set<string>();
+  private cfg: GitHubConfig & {
     id: string; host: string; pollIntervalSec: number; tokenEnv: string;
   };
 
   constructor(cfg: GitHubConfig) {
+    super();
     this.cfg = {
       ...cfg,
       id: cfg.id ?? "github",
@@ -78,22 +88,72 @@ export class GitHubAdapter implements CodeHostAdapter {
       : undefined;
     this.octokit = new Octokit({ auth: token, ...(baseUrl ? { baseUrl } : {}) });
 
-    this.repos = new Set(this.configRepos);
     const stored = await ctx.store.get(DYNAMIC_REPOS_KEY);
     if (stored) {
       try {
         const arr = JSON.parse(stored) as unknown;
         if (Array.isArray(arr)) {
-          for (const r of arr) if (typeof r === "string") this.repos.add(r);
+          for (const r of arr) if (typeof r === "string") this.dynamicRepos.add(r);
         }
       } catch (err) {
         ctx.logger.warn(`[github] failed to load dynamic repos: ${(err as Error).message}`);
       }
     }
-    ctx.logger.info(`[github] initialised for ${this.cfg.org} (${this.repos.size} repos: ${this.configRepos.size} config, ${this.repos.size - this.configRepos.size} dynamic)`);
+    this.recomputeRepos();
+    ctx.logger.info(`[github] initialised for ${this.cfg.org} (${this.repos.size} repos: ${this.configRepos.size} config, ${this.dynamicRepos.size} dynamic)`);
   }
 
-  listRepos(): RepoEntry[] {
+  /** Recompute the live `repos` set as the union of configRepos and dynamicRepos. */
+  private recomputeRepos(): void {
+    this.repos = new Set([...this.configRepos, ...this.dynamicRepos]);
+  }
+
+  getSpec(): CodeHostSpec {
+    return {
+      type: "github",
+      id: this.id,
+      data: {
+        host: this.cfg.host,
+        org: this.cfg.org,
+        repos: [...this.configRepos].sort(),
+        pollIntervalSec: this.cfg.pollIntervalSec,
+        tokenEnv: this.cfg.tokenEnv,
+        webhookSecretEnv: this.cfg.webhookSecretEnv ?? null,
+        webhookPath: this.cfg.webhookPath ?? `/webhooks/${this.id}`,
+      },
+    };
+  }
+
+  /**
+   * Apply a Tier 1+2 spec change. The supervisor has already verified that no
+   * Tier 3 keys differ. Currently the only Tier 1+2 keys are `repos` and
+   * `pollIntervalSec`.
+   */
+  async applySpec(next: CodeHostSpec): Promise<SpecApplyOutcome> {
+    const applied: string[] = [];
+    const failed: Array<{ key: string; reason: string }> = [];
+
+    if (Array.isArray(next.data.repos)) {
+      const newConfigRepos = new Set(next.data.repos as string[]);
+      const added = [...newConfigRepos].filter(r => !this.configRepos.has(r));
+      const removed = [...this.configRepos].filter(r => !newConfigRepos.has(r));
+      this.configRepos = newConfigRepos;
+      this.recomputeRepos();
+      if (added.length > 0 || removed.length > 0) {
+        this.ctx?.logger.info(`[github] config repos changed: +[${added.join(",")}] -[${removed.join(",")}]`);
+      }
+      applied.push("repos");
+    }
+
+    if (typeof next.data.pollIntervalSec === "number") {
+      this.cfg = { ...this.cfg, pollIntervalSec: next.data.pollIntervalSec };
+      applied.push("pollIntervalSec");
+    }
+
+    return { applied, failed };
+  }
+
+  override listRepos(): RepoEntry[] {
     return [...this.repos].sort().map(name => ({
       name,
       source: this.configRepos.has(name) ? "config" : "dynamic",
@@ -101,9 +161,7 @@ export class GitHubAdapter implements CodeHostAdapter {
   }
 
   /** Serializes addRepo/removeRepo so concurrent calls can't lose each other's writes. */
-  private mutationLock: Promise<void> = Promise.resolve();
-
-  async addRepo(name: string): Promise<void> {
+  override async addRepo(name: string): Promise<void> {
     return this.serializeMutation(async () => {
       if (!REPO_NAME_RE.test(name)) throw new Error(`invalid repo name "${name}"`);
       if (this.repos.has(name)) throw new Error(`already watching ${this.cfg.org}/${name}`);
@@ -114,23 +172,27 @@ export class GitHubAdapter implements CodeHostAdapter {
         if (status === 404) throw new Error(`${this.cfg.org}/${name} not found or token lacks access`);
         throw new Error(`Failed to verify ${this.cfg.org}/${name}: ${(err as Error).message}`);
       }
-      this.repos.add(name);
+      this.dynamicRepos.add(name);
+      this.recomputeRepos();
       await this.persistDynamicRepos();
       this.ctx.logger.info(`[github] watching ${this.cfg.org}/${name}`);
     });
   }
 
-  async removeRepo(name: string): Promise<void> {
+  override async removeRepo(name: string): Promise<void> {
     return this.serializeMutation(async () => {
-      if (this.configRepos.has(name)) {
-        throw new Error(`${name} is listed in aegis.config.ts; remove it there and restart`);
+      if (this.configRepos.has(name) && !this.dynamicRepos.has(name)) {
+        throw new Error(`${name} is listed in aegis.config.ts; remove it there (the change applies on next config reload)`);
       }
-      if (!this.repos.has(name)) throw new Error(`not watching ${this.cfg.org}/${name}`);
-      this.repos.delete(name);
+      if (!this.dynamicRepos.has(name)) throw new Error(`not watching ${this.cfg.org}/${name} dynamically`);
+      this.dynamicRepos.delete(name);
+      this.recomputeRepos();
       await this.persistDynamicRepos();
       this.ctx.logger.info(`[github] unwatched ${this.cfg.org}/${name}`);
     });
   }
+
+  private mutationLock: Promise<void> = Promise.resolve();
 
   private async serializeMutation<T>(fn: () => Promise<T>): Promise<T> {
     const previous = this.mutationLock;
@@ -141,15 +203,14 @@ export class GitHubAdapter implements CodeHostAdapter {
   }
 
   private async persistDynamicRepos(): Promise<void> {
-    const dynamic = [...this.repos].filter(r => !this.configRepos.has(r));
-    await this.ctx.store.set(DYNAMIC_REPOS_KEY, JSON.stringify(dynamic));
+    await this.ctx.store.set(DYNAMIC_REPOS_KEY, JSON.stringify([...this.dynamicRepos].sort()));
   }
 
   async dispose(): Promise<void> {
     this.subscribers = [];
   }
 
-  subscribe(handler: (e: PrEvent) => void): Disposable {
+  override subscribe(handler: (e: PrEvent) => void): Disposable {
     this.subscribers.push(handler);
     return {
       [Symbol.dispose]: () => {

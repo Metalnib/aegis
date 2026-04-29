@@ -5,7 +5,7 @@ type LogLevel = "debug" | "info" | "warn" | "error";
 const levels: LogLevel[] = ["debug", "info", "warn", "error"];
 
 export function createLogger(minLevel: LogLevel = "info", format: "json" | "text" = "json"): Logger {
-  const minIdx = levels.indexOf(minLevel);
+  let minIdx = levels.indexOf(minLevel);
 
   function log(level: LogLevel, msg: string, data?: unknown): void {
     if (levels.indexOf(level) < minIdx) return;
@@ -23,5 +23,6 @@ export function createLogger(minLevel: LogLevel = "info", format: "json" | "text
     info: (msg, data) => log("info", msg, data),
     warn: (msg, data) => log("warn", msg, data),
     error: (msg, data) => log("error", msg, data),
+    setLevel: (level: LogLevel) => { minIdx = levels.indexOf(level); },
   };
 }

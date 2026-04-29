@@ -1,5 +1,6 @@
 import type { AuditEntry, DlqEntry } from "./queue.js";
 import type { RepoEntry } from "@aegis/sdk";
+import type { ReloadStatus, ReloadOutcome } from "./config-store.js";
 
 export interface DashboardData {
   generatedAt: Date;
@@ -8,6 +9,7 @@ export interface DashboardData {
   adapters: Array<{ id: string; host: string; repos: RepoEntry[] }>;
   dlq: DlqEntry[];
   audit: AuditEntry[];
+  reload?: ReloadStatus;
 }
 
 /**
@@ -38,7 +40,13 @@ export function renderDashboard(data: DashboardData): string {
     .empty { color: #9ca3af; font-style: italic; padding: 12px 0; }
     .err { color: #b91c1c; font-family: ui-monospace, monospace; font-size: 11px; max-width: 480px; overflow: hidden; text-overflow: ellipsis; }
     .ts { color: #6b7280; white-space: nowrap; }
+    .banner { padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+    .banner.warn { background: #fef3c7; color: #78350f; border: 1px solid #fcd34d; }
+    .banner.err { background: #fee2e2; color: #7f1d1d; border: 1px solid #fca5a5; }
+    .banner.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
   `;
+
+  const reloadBlock = renderReloadSection(data.reload);
 
   const adapterSections = data.adapters.map(a => {
     if (a.repos.length === 0) return `<div class="empty">${esc(a.id)}: no repos watched</div>`;
@@ -87,6 +95,7 @@ export function renderDashboard(data: DashboardData): string {
   </div>
 </header>
 <main>
+  ${reloadBlock}
   <section>
     <h2>Queue</h2>
     <div class="stats">
@@ -120,6 +129,49 @@ export function renderDashboard(data: DashboardData): string {
 </main>
 </body>
 </html>`;
+}
+
+function renderReloadSection(status: DashboardData["reload"]): string {
+  if (!status) return "";
+
+  const tier3Banner = (status.pendingTier3Fields.length > 0 || status.pendingTier3Adapters.size > 0)
+    ? renderTier3Banner(status)
+    : "";
+
+  if (!status.lastAttempt) return tier3Banner;
+
+  const a = status.lastAttempt;
+  const cls = a.outcome.kind === "applied" || a.outcome.kind === "no-changes" ? "ok"
+    : a.outcome.kind === "tier3-refused" ? "warn"
+    : "err";
+  const detail = renderOutcomeDetail(a.outcome);
+  const lastBanner = `<div class="banner ${cls}">Last config reload (${esc(a.trigger)}, ${esc(formatTs(a.finishedAt))}): ${detail}</div>`;
+  return `${tier3Banner}${lastBanner}`;
+}
+
+function renderTier3Banner(status: NonNullable<DashboardData["reload"]>): string {
+  const parts: string[] = [];
+  if (status.pendingTier3Fields.length > 0) parts.push(`top-level: ${status.pendingTier3Fields.join(", ")}`);
+  for (const [id, keys] of status.pendingTier3Adapters) {
+    if (keys.length === 0) continue;
+    parts.push(`adapter ${id}: ${keys.join(", ")}`);
+  }
+  return `<div class="banner warn"><strong>Restart required</strong> to apply config changes &mdash; ${esc(parts.join("; "))}</div>`;
+}
+
+function renderOutcomeDetail(outcome: ReloadOutcome): string {
+  switch (outcome.kind) {
+    case "applied":
+      return `applied [${esc(outcome.appliedFields.join(", ") || "no top-level fields")}]${outcome.changedAdapters.length ? `; adapters [${esc(outcome.changedAdapters.join(", "))}]` : ""}`;
+    case "no-changes":
+      return "no changes detected";
+    case "tier3-refused":
+      return `refused, restart required (${esc(outcome.reason)})`;
+    case "validation-error":
+      return `validation failed (${esc(outcome.error)})`;
+    case "load-error":
+      return `load failed (${esc(outcome.error)})`;
+  }
 }
 
 function esc(s: string): string {

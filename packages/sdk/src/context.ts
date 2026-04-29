@@ -5,6 +5,12 @@ export interface Logger {
   info(msg: string, data?: unknown): void;
   warn(msg: string, data?: unknown): void;
   error(msg: string, data?: unknown): void;
+  /**
+   * Optional. Implementations that support runtime level changes (the default
+   * createLogger does) expose this hook so the supervisor can respond to a
+   * logging.level change without restarting.
+   */
+  setLevel?(level: "debug" | "info" | "warn" | "error"): void;
 }
 
 export interface SecretsProvider {

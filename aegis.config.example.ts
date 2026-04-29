@@ -23,10 +23,28 @@ export default defineConfig({
   // LLM agent settings. provider/model must be a valid Pi combination.
   // See: https://github.com/badlogic/pi-mono for the full model list.
   agent: {
-    provider: "anthropic",   // "anthropic" | "openai" | "google" | "mistral" | ...
+    provider: "anthropic",       // "anthropic" | "openai" | ... or any key from customProviders
     model:    "claude-opus-4-7",
     concurrency: 4,
     jobTimeoutSec: 600,
+    // Per-provider concurrency caps. Lower than `concurrency` for stricter rate-limited APIs.
+    providerLimits: {
+      // anthropic: { concurrency: 2 },
+    },
+    // OpenAI-compatible custom providers. Each key becomes a switchable provider
+    // via chat (`/model <name> <model-id>`). Anything not listed here falls
+    // through to Pi's built-in registry.
+    customProviders: {
+      // vultr: {
+      //   baseUrl: "https://api.vultrinference.com/v1",
+      //   apiKeyEnv: "VULTR_API_KEY",
+      //   contextWindow: 131072,
+      // },
+      // "local-ollama": {
+      //   baseUrl: "http://localhost:11434/v1",
+      //   contextWindow: 8192,
+      // },
+    },
   },
 
   // Optional embedded HTTP server for webhook intake and Prometheus metrics.

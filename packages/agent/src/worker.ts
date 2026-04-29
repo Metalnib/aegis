@@ -64,21 +64,98 @@ export class AgentWorker {
   private active!: ActiveModel;
   /** Per-provider concurrency caps. Lazily allocated on first use. */
   private readonly semaphores = new Map<string, Semaphore>();
+  /**
+   * Live agent config. Mutable so applyConfig() can swap it on hot reload.
+   * Reads take a local snapshot to avoid mid-job changes.
+   */
+  private currentConfig: AgentConfig;
 
-  constructor(private readonly opts: WorkerOptions) {}
+  constructor(private readonly opts: WorkerOptions) {
+    this.currentConfig = opts.config;
+  }
 
   private semaphoreFor(provider: string): Semaphore {
     let sem = this.semaphores.get(provider);
     if (!sem) {
-      const cap = this.opts.config.providerLimits[provider]?.concurrency ?? this.opts.config.concurrency;
+      const cap = this.currentConfig.providerLimits[provider]?.concurrency ?? this.currentConfig.concurrency;
       sem = new Semaphore(cap);
       this.semaphores.set(provider, sem);
     }
     return sem;
   }
 
+  /**
+   * Apply a hot-reloaded agent config to this worker. Returns a list of
+   * fields actually applied, plus an optional notice if a saved model
+   * override targeted a customProvider that was just removed.
+   */
+  async applyConfig(next: AgentConfig): Promise<{
+    applied: string[];
+    droppedOverride: { provider: string; modelId: string; reason: string } | null;
+  }> {
+    const applied: string[] = [];
+    const old = this.currentConfig;
+
+    // Swap the live snapshot first so resolveModel() sees the new providers.
+    this.currentConfig = next;
+
+    if (old.providerLimits !== next.providerLimits || old.concurrency !== next.concurrency) {
+      // Recreate any semaphore whose cap changed. New jobs use the new cap; in-flight
+      // jobs hold the old permit until release. Capacity contraction can over-subscribe
+      // briefly, but never wedges, because release() does not check the cap.
+      const oldCaps = new Map<string, number>();
+      for (const [p, sem] of this.semaphores) oldCaps.set(p, (sem as unknown as { capacity: number }).capacity ?? 0);
+      this.semaphores.clear();
+      applied.push("concurrency", "providerLimits");
+    }
+
+    // If the active model points to a custom provider that was removed, drop the
+    // saved override and revert to the default.
+    let droppedOverride: { provider: string; modelId: string; reason: string } | null = null;
+    const activeIsCustom = !!old.customProviders[this.active.provider];
+    const stillExists = !!next.customProviders[this.active.provider];
+    if (activeIsCustom && !stillExists) {
+      droppedOverride = {
+        provider: this.active.provider,
+        modelId: this.active.modelId,
+        reason: `customProvider "${this.active.provider}" was removed from config`,
+      };
+      await this.opts.store.delete(MODEL_OVERRIDE_KEY);
+      const fallbackProvider = next.customProviders[next.provider] ? next.provider : next.provider;
+      const fallbackModel = next.customProviders[fallbackProvider] ? next.model : next.model;
+      try {
+        this.active = buildActive(fallbackProvider, fallbackModel, next);
+        this.opts.logger.warn(`[agent] dropped saved override ${droppedOverride.provider}/${droppedOverride.modelId}, reverted to ${fallbackProvider}/${fallbackModel}`);
+      } catch (err) {
+        this.opts.logger.error(`[agent] failed to revert to default model after override drop: ${(err as Error).message}`);
+      }
+      applied.push("activeModel");
+    }
+
+    if (old.jobTimeoutSec !== next.jobTimeoutSec) applied.push("jobTimeoutSec");
+    if (old.provider !== next.provider || old.model !== next.model) applied.push("defaultModel");
+
+    return { applied, droppedOverride };
+  }
+
+  /**
+   * Reload skills + soul from disk. Called when the `skills` config field
+   * changes during hot reload. Active jobs keep using the prompt they
+   * started with; new jobs pick up the rebuilt prompt.
+   */
+  async reloadSkills(skillNames: string[]): Promise<void> {
+    const { skillLoader, soulPath, logger } = this.opts;
+    let soul = "";
+    try { soul = await readFile(soulPath, "utf-8"); } catch { /* tolerated */ }
+    const skills = await skillLoader.load(skillNames);
+    const skillBlock = skills.map(s => `## Skill: ${s.name}\n\n${s.content}`).join("\n\n---\n\n");
+    this.systemPrompt = [soul, "---", "## Loaded skills", skillBlock].filter(Boolean).join("\n\n");
+    logger.info(`[agent] skills reloaded (${skills.length} loaded)`);
+  }
+
   async init(): Promise<void> {
-    const { config, skillLoader, skillNames, soulPath, logger } = this.opts;
+    const { skillLoader, skillNames, soulPath, logger } = this.opts;
+    const config = this.currentConfig;
 
     let soul = "";
     try {
@@ -97,7 +174,7 @@ export class AgentWorker {
     const saved = await loadSavedOverride(this.opts.store);
     if (saved) {
       try {
-        this.active = buildActive(saved.provider, saved.modelId);
+        this.active = buildActive(saved.provider, saved.modelId, config);
         logger.info(`[agent] restored saved model ${saved.provider}/${saved.modelId}`);
       } catch (err) {
         logger.warn(`[agent] saved model ${saved.provider}/${saved.modelId} is invalid (${(err as Error).message}), falling back to config default`);
@@ -105,7 +182,7 @@ export class AgentWorker {
     }
 
     if (!this.active) {
-      this.active = buildActive(config.provider, config.model);
+      this.active = buildActive(config.provider, config.model, config);
     }
 
     logger.info(`[agent] initialised with ${skills.length} skills, model ${this.active.provider}/${this.active.modelId}`);
@@ -114,7 +191,7 @@ export class AgentWorker {
   /** Switch the active model at runtime and persist the choice. */
   async setModel(provider: string, modelId: string): Promise<void> {
     const { logger, store } = this.opts;
-    const next = buildActive(provider, modelId); // throws if unknown
+    const next = buildActive(provider, modelId, this.currentConfig); // throws if unknown
     await store.set(MODEL_OVERRIDE_KEY, JSON.stringify({ provider, modelId }));
     this.active = next;
     logger.info(`[agent] model changed to ${provider}/${modelId}`);
@@ -122,8 +199,9 @@ export class AgentWorker {
 
   /** Revert to the provider/model in aegis.config.js and clear the persisted override. */
   async resetModel(): Promise<void> {
-    const { config, logger, store } = this.opts;
-    const next = buildActive(config.provider, config.model);
+    const { logger, store } = this.opts;
+    const config = this.currentConfig;
+    const next = buildActive(config.provider, config.model, config);
     await store.delete(MODEL_OVERRIDE_KEY);
     this.active = next;
     logger.info(`[agent] model reset to config default ${config.provider}/${config.model}`);
@@ -131,7 +209,7 @@ export class AgentWorker {
 
   /** Return the currently active model and whether it overrides the config default. */
   getModelInfo(): ModelInfo {
-    const { provider: configProvider, model: configModelId } = this.opts.config;
+    const { provider: configProvider, model: configModelId } = this.currentConfig;
     const a = this.active;
     return {
       provider: a.provider,
@@ -142,13 +220,16 @@ export class AgentWorker {
     };
   }
 
-  /** Return all provider names registered in Pi. */
-  getAvailableProviders(): string[] {
-    return getProviders();
+  /** Return all provider names available - built-in (Pi) plus configured custom providers. */
+  getAvailableProviders(): { name: string; kind: "builtin" | "custom" }[] {
+    const builtin = getProviders().map(name => ({ name, kind: "builtin" as const }));
+    const custom = Object.keys(this.currentConfig.customProviders).map(name => ({ name, kind: "custom" as const }));
+    return [...custom, ...builtin].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async review(job: ReviewJob, diff: DiffBundle, repoPath: string): Promise<AegisReview> {
-    const { config, mcp, logger } = this.opts;
+    const { mcp, logger } = this.opts;
+    const config = this.currentConfig;
 
     logger.info(`[agent] starting review for ${job.ref.owner}/${job.ref.repo}#${job.ref.number}`);
 
@@ -159,8 +240,10 @@ export class AgentWorker {
     try {
       const tools: AgentTool[] = [...mcp.getAgentTools(), ghCliTool()];
 
+      const getApiKey = makeGetApiKey(config);
       const agent = new Agent({
         initialState: { systemPrompt: this.systemPrompt, model: active.model, tools },
+        ...(getApiKey ? { getApiKey } : {}),
       });
 
       let finalMessages: AgentMessage[] = [];
@@ -192,6 +275,7 @@ export class AgentWorker {
    */
   async query(question: string, timeoutMs = 180_000): Promise<string> {
     const { mcp, logger } = this.opts;
+    const config = this.currentConfig;
     const tools: AgentTool[] = mcp.getAgentTools();
 
     const systemPrompt = [
@@ -206,7 +290,8 @@ export class AgentWorker {
     const release = await this.semaphoreFor(active.provider).acquire();
     let timedOut = false;
     try {
-      const agent = new Agent({ initialState: { systemPrompt, model: active.model, tools } });
+      const getApiKey = makeGetApiKey(config);
+      const agent = new Agent({ initialState: { systemPrompt, model: active.model, tools }, ...(getApiKey ? { getApiKey } : {}) });
 
       let finalMessages: AgentMessage[] = [];
       const unsubscribe = agent.subscribe(async (event) => {
@@ -243,20 +328,46 @@ export class QueryTimeoutError extends Error {
   }
 }
 
-function resolveModel(provider: string, modelId: string): Model<Api> {
+function resolveModel(provider: string, modelId: string, cfg: AgentConfig): Model<Api> {
+  const custom = cfg.customProviders[provider];
+  if (custom) {
+    const inputs: ("text" | "image")[] = custom.vision ? ["text", "image"] : ["text"];
+    return {
+      id: modelId,
+      name: modelId,
+      api: custom.api as Api,
+      provider,
+      baseUrl: custom.baseUrl,
+      reasoning: custom.reasoning,
+      input: inputs,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: custom.contextWindow,
+      maxTokens: custom.maxTokens,
+    };
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const model = getModel(provider as any, modelId as any) as Model<Api> | undefined;
   if (!model) {
+    const known = Object.keys(cfg.customProviders).concat(getProviders());
     throw new Error(
       `Unknown model "${modelId}" for provider "${provider}". ` +
-      `Check your aegis.config.js agent.provider and agent.model settings.`,
+      `Configured providers: ${known.sort().join(", ")}.`,
     );
   }
   return model;
 }
 
-function buildActive(provider: string, modelId: string): ActiveModel {
-  return { provider, modelId, model: resolveModel(provider, modelId) };
+function buildActive(provider: string, modelId: string, cfg: AgentConfig): ActiveModel {
+  return { provider, modelId, model: resolveModel(provider, modelId, cfg) };
+}
+
+function makeGetApiKey(cfg: AgentConfig): ((provider: string) => string | undefined) | undefined {
+  if (Object.keys(cfg.customProviders).length === 0) return undefined;
+  return (provider: string) => {
+    const custom = cfg.customProviders[provider];
+    if (custom?.apiKeyEnv) return process.env[custom.apiKeyEnv];
+    return undefined;
+  };
 }
 
 async function loadSavedOverride(store: KvStore): Promise<{ provider: string; modelId: string } | null> {

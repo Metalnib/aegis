@@ -2,9 +2,12 @@ import { App, type AppOptions } from "@slack/bolt";
 import type {
   ChatAdapter, AdapterContext,
   ChatCommand, ChatBody, ChannelRef,
+  ChatSpec, SpecApplyOutcome,
 } from "@aegis/sdk";
+import { ChatAdapterBase } from "@aegis/sdk";
 
 export interface SlackConfig {
+  id?: string;
   channels: string[];
   notifyOn: string[];
   socketMode?: boolean;
@@ -21,13 +24,22 @@ export function slack(cfg: SlackConfig): ChatAdapter {
   return new SlackAdapter(cfg);
 }
 
-export class SlackAdapter implements ChatAdapter {
-  readonly id = "slack";
+export class SlackAdapter extends ChatAdapterBase {
+  readonly id: string;
+  protected readonly tier3SpecKeys = new Set([
+    "socketMode", "botTokenEnv", "appTokenEnv", "signingSecretEnv",
+  ]);
+
   private app!: App;
   private ctx!: AdapterContext;
   private commandHandlers: Array<(c: ChatCommand) => void> = [];
+  private cfg: SlackConfig & { id: string };
 
-  constructor(private readonly cfg: SlackConfig) {}
+  constructor(cfg: SlackConfig) {
+    super();
+    this.cfg = { ...cfg, id: cfg.id ?? "slack" };
+    this.id = this.cfg.id;
+  }
 
   async init(ctx: AdapterContext): Promise<void> {
     this.ctx = ctx;
@@ -71,11 +83,57 @@ export class SlackAdapter implements ChatAdapter {
     });
 
     await this.app.start();
-    ctx.logger.info("[slack] adapter started");
+    ctx.logger.info(`[slack] adapter started (channels: ${this.cfg.channels.length}, notifyOn: ${this.cfg.notifyOn.join(",")})`);
   }
 
   async dispose(): Promise<void> {
     await this.app?.stop();
+  }
+
+  getSpec(): ChatSpec {
+    return {
+      type: "slack",
+      id: this.id,
+      data: {
+        channels: [...this.cfg.channels].sort(),
+        notifyOn: [...this.cfg.notifyOn].sort(),
+        socketMode: this.cfg.socketMode !== false,
+        botTokenEnv: this.cfg.botTokenEnv ?? "SLACK_BOT_TOKEN",
+        appTokenEnv: this.cfg.appTokenEnv ?? null,
+        signingSecretEnv: this.cfg.signingSecretEnv ?? null,
+        permissions: {
+          memberUsers: [...(this.cfg.permissions?.memberUsers ?? [])].sort(),
+          adminUsers: [...(this.cfg.permissions?.adminUsers ?? [])].sort(),
+        },
+      },
+    };
+  }
+
+  async applySpec(next: ChatSpec): Promise<SpecApplyOutcome> {
+    const applied: string[] = [];
+    const failed: Array<{ key: string; reason: string }> = [];
+
+    if (Array.isArray(next.data.channels)) {
+      this.cfg = { ...this.cfg, channels: next.data.channels as string[] };
+      applied.push("channels");
+    }
+    if (Array.isArray(next.data.notifyOn)) {
+      this.cfg = { ...this.cfg, notifyOn: next.data.notifyOn as string[] };
+      applied.push("notifyOn");
+    }
+    if (next.data.permissions && typeof next.data.permissions === "object") {
+      const p = next.data.permissions as { memberUsers?: string[]; adminUsers?: string[] };
+      this.cfg = {
+        ...this.cfg,
+        permissions: {
+          memberUsers: p.memberUsers ?? [],
+          adminUsers: p.adminUsers ?? [],
+        },
+      };
+      applied.push("permissions");
+    }
+
+    return { applied, failed };
   }
 
   onCommand(handler: (c: ChatCommand) => void): Disposable {
@@ -105,7 +163,7 @@ export class SlackAdapter implements ChatAdapter {
     });
   }
 
-  getUserPermission(userId: string): "public" | "member" | "admin" {
+  override getUserPermission(userId: string): "public" | "member" | "admin" {
     const { adminUsers = [], memberUsers = [] } = this.cfg.permissions ?? {};
     if (adminUsers.includes(userId)) return "admin";
     if (memberUsers.includes(userId)) return "member";

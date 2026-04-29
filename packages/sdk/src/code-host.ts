@@ -1,6 +1,16 @@
 import type { PrRef, PrEvent, DiffBundle, PrInfo, PrSearchQuery, AegisReview } from "./types.js";
 import type { AdapterContext } from "./context.js";
 
+/**
+ * Optional surface that adapters opt into to support config hot-reload.
+ * Adapters extending CodeHostAdapterBase get this for free.
+ */
+export interface SpecAware<TSpec> {
+  getSpec(): TSpec;
+  diffSpec(next: TSpec): { tier1: string[]; tier3: string[] };
+  applySpec(next: TSpec): Promise<{ applied: string[]; failed: Array<{ key: string; reason: string }> }>;
+}
+
 export interface CodeHostAdapter {
   readonly id: string;
   init(ctx: AdapterContext): Promise<void>;
