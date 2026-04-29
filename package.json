@@ -13,9 +13,12 @@
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "tsx": "^4.21.0",
     "typescript": "^5.8.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3"]
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
   }
 }
