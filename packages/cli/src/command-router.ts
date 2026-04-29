@@ -106,8 +106,11 @@ export class CommandRouter {
       return;
     }
 
+    // Exact match only: first the adapter id, then its declared host.
+    // Substring matching would silently route to the wrong adapter when one
+    // id is a substring of another.
     const host = this.deps.cfg.codeHosts.find(h => h.id === ref.host)
-      ?? this.deps.cfg.codeHosts.find(h => ref.host.includes(h.id));
+      ?? this.deps.cfg.codeHosts.find(h => readAdapterHost(h) === ref.host);
 
     if (!host) {
       await chat.reply(cmd, { text: `No adapter configured for \`${ref.host}\`. Check \`codeHosts\` in your config.` });
@@ -446,6 +449,15 @@ function parsePrUrl(url: string): PrRef | null {
   const gl = url.match(/^https?:\/\/(gitlab\.com|[^/]+)\/([^/]+)\/([^/]+)\/-\/merge_requests\/(\d+)/);
   if (gl) {
     return { host: gl[1]!, owner: gl[2]!, repo: gl[3]!, number: parseInt(gl[4]!, 10), headSha: "" };
+  }
+  return null;
+}
+
+function readAdapterHost(host: { getSpec?: () => { data?: { host?: string } } } | unknown): string | null {
+  const aware = host as { getSpec?: () => { data?: { host?: string } } };
+  if (typeof aware.getSpec === "function") {
+    const spec = aware.getSpec();
+    if (typeof spec.data?.host === "string") return spec.data.host;
   }
   return null;
 }

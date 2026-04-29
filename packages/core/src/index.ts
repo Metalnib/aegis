@@ -13,7 +13,7 @@ export { loadConfig, defineConfig, TIER3_TOP_LEVEL_FIELDS } from "./config.js";
 export { EnvSecrets } from "./secrets.js";
 export { SqliteKvStore } from "./kv-store.js";
 export { createLogger } from "./logger.js";
-export { ConfigStore, computeChangeSet } from "./config-store.js";
+export { ConfigStore, computeChangeSet, sanitizeValidationError } from "./config-store.js";
 export { ReadinessGate } from "./readiness.js";
 export type { ConfigStoreOptions, ReloadOutcome, ReloadStatus, ReloadAttempt, ReloadTrigger } from "./config-store.js";
 export type {

@@ -88,13 +88,23 @@ export const HttpConfigSchema = z.object({
   metricsTokenEnv: z.string().optional(),
 });
 
+/**
+ * Adapters are constructed by user-imported factory calls (e.g.
+ * `github({...})`). We can't statically validate the full shape (it's
+ * runtime-typed by adapter package), so we accept `passthrough()` but
+ * require an `id` so loaders, diffing, and routing all have something to
+ * key by. A typo'd codeHosts entry without `id` fails fast at load time
+ * instead of silently no-op'ing on every reload.
+ */
+const AdapterRefSchema = z.object({ id: z.string().min(1) }).passthrough();
+
 export const AegisConfigSchema = z.object({
   workspace: z.string().default("/workspace"),
   dbPath: z.string().default("/var/lib/aegis/aegis.db"),
   synopsis: SynopsisConfigSchema,
   agent: AgentConfigSchema,
-  codeHosts: z.array(z.any()).min(1),
-  chats: z.array(z.any()).default([]),
+  codeHosts: z.array(AdapterRefSchema).min(1),
+  chats: z.array(AdapterRefSchema).default([]),
   skills: z.array(z.string()).default([]),
   skillsDir: z.string().default("/opt/aegis/skills"),
   soulPath: z.string().default("/opt/aegis/SOUL.md"),
@@ -109,7 +119,7 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 export type QueueConfig = z.infer<typeof QueueConfigSchema>;
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>;
 export type HttpConfig = z.infer<typeof HttpConfigSchema>;
-export type AegisConfig = z.infer<typeof AegisConfigSchema> & {
+export type AegisConfig = Omit<z.infer<typeof AegisConfigSchema>, "codeHosts" | "chats"> & {
   codeHosts: CodeHostAdapter[];
   chats: ChatAdapter[];
 };
@@ -127,7 +137,11 @@ export function defineConfig(cfg: Partial<AegisConfig> & { synopsis: SynopsisCon
 }
 
 export function loadConfig(cfg: unknown): AegisConfig {
-  return AegisConfigSchema.parse(cfg) as AegisConfig;
+  // The schema validates that codeHosts/chats entries have an `id`. The
+  // adapter factories (e.g. `github(...)`) return real CodeHostAdapter/
+  // ChatAdapter instances at runtime. The cast to AegisConfig narrows
+  // the static type back to the adapter interfaces.
+  return AegisConfigSchema.parse(cfg) as unknown as AegisConfig;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

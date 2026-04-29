@@ -172,7 +172,10 @@ export class Queue {
     const attempts = row?.attempts ?? maxAttempts;
 
     if (attempts < maxAttempts) {
-      this.db.prepare(`UPDATE review_jobs SET status = 'pending', error = ? WHERE id = ?`).run(error, id);
+      // Reset defers: a non-rate-limit failure breaks any consecutive-defer
+      // streak. Without this, a job rate-limited 5x then failing transiently
+      // would DLQ in 5 more defers instead of MAX_DEFERS=10.
+      this.db.prepare(`UPDATE review_jobs SET status = 'pending', error = ?, defers = 0 WHERE id = ?`).run(error, id);
       return "retry";
     }
 

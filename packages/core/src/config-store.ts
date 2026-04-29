@@ -176,7 +176,10 @@ export class ConfigStore {
     try {
       next = loadConfig(raw) as AegisConfig;
     } catch (err) {
-      return { kind: "validation-error", error: (err as Error).message };
+      // Strip the rejected value from Zod errors before logging - it can
+      // include inline secrets if a config carries one in the wrong field.
+      // We keep the path and the message but drop the offending value.
+      return { kind: "validation-error", error: sanitizeValidationError(err) };
     }
 
     const change = computeChangeSet(this.current, next);
@@ -377,6 +380,28 @@ function adapterDiffTier3(
   return aware.diffSpec(newSpec).tier3;
 }
 
+/**
+ * Format a Zod (or other) validation error without leaking the offending
+ * `received` values. The path and message are retained because they are
+ * what the operator needs to locate the bad field; the value itself may be
+ * an inline secret pasted into the wrong slot.
+ */
+export function sanitizeValidationError(err: unknown): string {
+  type ZodIssueLike = { path?: ReadonlyArray<string | number>; message?: string; code?: string };
+  const e = err as { issues?: unknown[]; message?: string };
+  if (!Array.isArray(e?.issues)) return e?.message ?? String(err);
+  const lines: string[] = [];
+  for (const raw of e.issues) {
+    const issue = raw as ZodIssueLike;
+    const path = (issue.path ?? []).join(".");
+    lines.push(`${path || "(root)"}: ${issue.message ?? "invalid"}${issue.code ? ` [${issue.code}]` : ""}`);
+  }
+  return lines.length > 0 ? lines.join("; ") : (e.message ?? String(err));
+}
+
+/** Keys that must never be walked, even if they show up as own properties. */
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a == null || b == null) return false;
@@ -387,13 +412,17 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return true;
   }
   if (typeof a === "object" && typeof b === "object") {
-    const ak = Object.keys(a as object).sort();
-    const bk = Object.keys(b as object).sort();
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const ak = Object.keys(ao).filter(k => !FORBIDDEN_KEYS.has(k)).sort();
+    const bk = Object.keys(bo).filter(k => !FORBIDDEN_KEYS.has(k)).sort();
     if (ak.length !== bk.length) return false;
     for (let i = 0; i < ak.length; i++) {
-      if (ak[i] !== bk[i]) return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (!deepEqual((a as any)[ak[i] as string], (b as any)[bk[i] as string])) return false;
+      const key = ak[i] as string;
+      if (key !== bk[i]) return false;
+      if (!Object.prototype.hasOwnProperty.call(ao, key)) return false;
+      if (!Object.prototype.hasOwnProperty.call(bo, key)) return false;
+      if (!deepEqual(ao[key], bo[key])) return false;
     }
     return true;
   }

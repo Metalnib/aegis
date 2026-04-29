@@ -49,6 +49,8 @@ export interface SpecApplyOutcome {
   failed: Array<{ key: string; reason: string }>;
 }
 
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a == null || b == null) return false;
@@ -59,13 +61,17 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return true;
   }
   if (typeof a === "object" && typeof b === "object") {
-    const ak = Object.keys(a as object).sort();
-    const bk = Object.keys(b as object).sort();
+    const ao = a as Record<string, unknown>;
+    const bo = b as Record<string, unknown>;
+    const ak = Object.keys(ao).filter(k => !FORBIDDEN_KEYS.has(k)).sort();
+    const bk = Object.keys(bo).filter(k => !FORBIDDEN_KEYS.has(k)).sort();
     if (ak.length !== bk.length) return false;
     for (let i = 0; i < ak.length; i++) {
-      if (ak[i] !== bk[i]) return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (!deepEqual((a as any)[ak[i] as string], (b as any)[bk[i] as string])) return false;
+      const key = ak[i] as string;
+      if (key !== bk[i]) return false;
+      if (!Object.prototype.hasOwnProperty.call(ao, key)) return false;
+      if (!Object.prototype.hasOwnProperty.call(bo, key)) return false;
+      if (!deepEqual(ao[key], bo[key])) return false;
     }
     return true;
   }

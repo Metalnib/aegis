@@ -265,13 +265,18 @@ async function maybeStartHttpServer(
 }
 
 function hostFor(host: CodeHostAdapter): string {
+  return readAdapterHost(host) ?? host.id;
+}
+
+/** Read the configured hostname from an adapter's spec, if it exposes one. */
+function readAdapterHost(host: CodeHostAdapter): string | null {
   const aware = host as unknown as { getSpec?: () => { data?: { host?: string } } };
   if (typeof aware.getSpec === "function") {
     const spec = aware.getSpec();
-    if (spec.data?.host) return spec.data.host;
+    if (typeof spec.data?.host === "string") return spec.data.host;
   }
   const cfg = (host as unknown as { cfg?: { host?: string } }).cfg;
-  return cfg?.host ?? host.id;
+  return cfg?.host ?? null;
 }
 
 function subscribeWebhookEnqueue(
@@ -450,7 +455,11 @@ async function processJob(
   logger.info(`[worker] processing ${ref.owner}/${ref.repo}#${ref.number}`, { jobId: job.id });
 
   try {
-    const host = liveCodeHosts.find(h => h.id === ref.host) ?? liveCodeHosts.find(h => ref.host.includes(h.id));
+    // Look up by exact match: first try adapter id, then the adapter's spec
+    // data.host (e.g. "github.com"). Avoid substring matching - two adapters
+    // where one id is a substring of another would silently collide.
+    const host = liveCodeHosts.find(h => h.id === ref.host)
+      ?? liveCodeHosts.find(h => readAdapterHost(h) === ref.host);
     if (!host) throw new Error(`No adapter for host ${ref.host}`);
 
     const diff = await host.fetchDiff(ref);
@@ -555,7 +564,16 @@ function buildSynopsisArgs(cfg: AegisConfig): string[] {
 
 async function waitForShutdown(cleanup: () => Promise<void>): Promise<void> {
   return new Promise(resolve => {
+    // Cleanup must run exactly once even if SIGINT and SIGTERM arrive in
+    // quick succession. Concurrent cleanup would race workerLoop.drain and
+    // could double-close SQLite handles.
+    let cleaningUp = false;
     const handle = async (signal: string) => {
+      if (cleaningUp) {
+        console.log(`[aegis] already shutting down, ignoring ${signal}`);
+        return;
+      }
+      cleaningUp = true;
       console.log(`\n[aegis] received ${signal}`);
       await cleanup();
       resolve();

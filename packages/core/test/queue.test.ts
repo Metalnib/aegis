@@ -135,6 +135,37 @@ test("recoverOrphaned resets running jobs to pending", () => {
   assert.equal(reclaimed?.id, j1?.id);
 });
 
+test("fail() resets defers so a transient error breaks the rate-limit streak", () => {
+  // Regression for review finding 5: defers must reset when a non-rate-limit
+  // failure happens. A job rate-limited 5 times then failing transiently
+  // should not DLQ in 5 more defers - it should get the full MAX_DEFERS budget.
+  const job = q.enqueue(refA1);
+  assert.ok(job);
+
+  // Rate-limit 5 times.
+  for (let i = 0; i < 5; i++) {
+    q.claim(10);
+    const outcome = q.delayRetry(job.id, -60);
+    assert.equal(outcome, "deferred");
+  }
+
+  // Transient (non-rate-limit) failure - should reset defers.
+  q.claim(10);
+  const failOutcome = q.fail(job.id, "boom", 100);
+  assert.equal(failOutcome, "retry");
+
+  // Now MAX_DEFERS-1 more defers should still be possible.
+  for (let i = 0; i < Queue.MAX_DEFERS - 1; i++) {
+    q.claim(100);
+    const outcome = q.delayRetry(job.id, -60);
+    assert.equal(outcome, "deferred", `post-reset defer ${i + 1} should still be deferred`);
+  }
+
+  // The MAX_DEFERS-th defer should now DLQ.
+  q.claim(100);
+  assert.equal(q.delayRetry(job.id, -60), "dlq");
+});
+
 test("claim is atomic - status flips and attempts increments together", () => {
   // Regression for review finding 1: claim() used to be a SELECT then a
   // separate UPDATE. With UPDATE...WHERE id=(SELECT...) RETURNING * the
