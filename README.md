@@ -6,6 +6,8 @@ An autonomous AI code-review agent for .NET microservice fleets.
 
 ---
 
+## The problem
+
 The pull request queue never empties anymore. AI agents generate implementations in minutes and code review is supposed to happen the same afternoon. In practice it doesn't, not the kind that matters. The code compiles, the tests pass, and it ships.
 
 What ships with it is harder to see. A missed CancellationToken that causes requests to hang under backpressure. A contract change in one service that quietly breaks two others whose teams find out three deploys later. A buffer with no bound that works fine in testing and falls over at 10x load. Not the kind of bugs static analysis catches. The kind that only appear when the whole system is moving.
