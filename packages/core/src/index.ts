@@ -14,6 +14,7 @@ export { EnvSecrets } from "./secrets.js";
 export { SqliteKvStore } from "./kv-store.js";
 export { createLogger } from "./logger.js";
 export { ConfigStore, computeChangeSet } from "./config-store.js";
+export { ReadinessGate } from "./readiness.js";
 export type { ConfigStoreOptions, ReloadOutcome, ReloadStatus, ReloadAttempt, ReloadTrigger } from "./config-store.js";
 export type {
   AegisConfig, CodeHostConfig, ChatConfig, QueueConfig, SynopsisConfig,

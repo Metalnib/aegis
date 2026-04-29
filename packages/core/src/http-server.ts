@@ -1,6 +1,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import type { Logger, WebhookEndpoint } from "@aegis/sdk";
+import type { ReadinessGate } from "./readiness.js";
 
 export interface HttpServerOptions {
   port: number;
@@ -14,6 +15,12 @@ export interface HttpServerOptions {
   dashboard?: () => string;
   /** Optional shared-secret for /metrics and /dashboard, sent as Authorization: Bearer <token>. */
   metricsToken?: string;
+  /**
+   * Readiness gate. When provided, /healthz returns 503 + JSON listing
+   * pending subsystems while not ready, and webhook POSTs return 503
+   * "starting". See ADR 0016.
+   */
+  readinessGate?: ReadinessGate;
 }
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB - generous for PR webhooks, capped to deny abuse.
@@ -59,7 +66,7 @@ export class HttpServer {
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const { logger, webhooks, metrics, dashboard, metricsToken } = this.opts;
+    const { logger, webhooks, metrics, dashboard, metricsToken, readinessGate } = this.opts;
     const url = req.url ?? "/";
     const method = req.method ?? "GET";
 
@@ -71,6 +78,10 @@ export class HttpServer {
 
     try {
       if (method === "GET" && url === "/healthz") {
+        if (readinessGate && !readinessGate.isReady()) {
+          const body = JSON.stringify({ status: "not-ready", pending: readinessGate.pending() });
+          return send(res, 503, body, "application/json");
+        }
         return send(res, 200, "ok");
       }
       if (method === "GET" && url === "/metrics") {
@@ -86,6 +97,14 @@ export class HttpServer {
       if (method === "POST") {
         const endpoint = webhooks.get(url);
         if (!endpoint) return send(res, 404, "not found");
+
+        // Webhook intake is gated on readiness: 503 during boot is the
+        // documented contract (ARCHITECTURE.md "Tradeoff: 503 vs buffer-and-replay").
+        // GitHub and GitLab retry 5xx automatically.
+        if (readinessGate && !readinessGate.isReady()) {
+          const body = JSON.stringify({ status: "starting", pending: readinessGate.pending() });
+          return send(res, 503, body, "application/json");
+        }
 
         const body = await readBody(req);
         const headers: Record<string, string> = {};

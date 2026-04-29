@@ -10,6 +10,8 @@ export interface DashboardData {
   dlq: DlqEntry[];
   audit: AuditEntry[];
   reload?: ReloadStatus;
+  /** Boot readiness, see ADR 0016. When `ready` is false, a "Starting" banner shows. */
+  startup?: { ready: boolean; pending: string[] };
 }
 
 /**
@@ -46,6 +48,7 @@ export function renderDashboard(data: DashboardData): string {
     .banner.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
   `;
 
+  const startupBlock = renderStartupBanner(data.startup);
   const reloadBlock = renderReloadSection(data.reload);
 
   const adapterSections = data.adapters.map(a => {
@@ -95,6 +98,7 @@ export function renderDashboard(data: DashboardData): string {
   </div>
 </header>
 <main>
+  ${startupBlock}
   ${reloadBlock}
   <section>
     <h2>Queue</h2>
@@ -129,6 +133,12 @@ export function renderDashboard(data: DashboardData): string {
 </main>
 </body>
 </html>`;
+}
+
+function renderStartupBanner(startup: DashboardData["startup"]): string {
+  if (!startup || startup.ready) return "";
+  const pending = startup.pending.length > 0 ? startup.pending.join(", ") : "(unknown)";
+  return `<div class="banner warn"><strong>Starting</strong> &mdash; waiting for: ${esc(pending)}</div>`;
 }
 
 function renderReloadSection(status: DashboardData["reload"]): string {

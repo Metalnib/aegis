@@ -58,6 +58,26 @@ service:
   type: ClusterIP
   port: 8080
 
+# Health probes. The startupProbe absorbs the Synopsis cold-scan time
+# (proportional to workspace size, project count, NuGet restore cost,
+# and underlying disk/CPU speed). Defaults give 10 minutes total
+# tolerance: 60 attempts * 10s period. Raise failureThreshold for
+# larger workspaces or constrained hardware. See ADR 0016.
+probes:
+  startup:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 60
+    timeoutSeconds: 5
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000

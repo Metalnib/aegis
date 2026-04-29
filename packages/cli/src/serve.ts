@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import {
   EventBus, Queue, Supervisor, GitSync, HttpServer, Metrics,
   loadConfig, EnvSecrets, SqliteKvStore, createLogger,
-  renderDashboard, ConfigStore,
+  renderDashboard, ConfigStore, ReadinessGate,
   type AegisConfig,
 } from "@aegis/core";
 import { AgentWorker, SkillLoader, SynopsisMcpClient } from "@aegis/agent";
@@ -35,6 +35,11 @@ export async function serve(rawConfig: unknown, opts: ServeOptions): Promise<voi
   const queue = new Queue(cfg.dbPath);
   const gitSync = new GitSync(cfg.workspace, logger);
 
+  // Readiness gate (ADR 0016). Three subsystems must come up before Aegis
+  // accepts work. SQLite is ready as soon as the Queue construction returns.
+  const readiness = new ReadinessGate(["sqlite", "synopsis", "mcp"]);
+  readiness.markReady("sqlite");
+
   const mcp = new SynopsisMcpClient(cfg.synopsis.path ?? "/var/run/aegis/synopsis.sock", logger);
 
   const synopsisBin = cfg.synopsis.bin ?? process.env["SYNOPSIS_BIN"] ?? "/opt/aegis/bin/synopsis";
@@ -45,7 +50,10 @@ export async function serve(rawConfig: unknown, opts: ServeOptions): Promise<voi
     logger,
     readySignal: "MCP server listening",
     onReady: () => {
-      mcp.connect().catch(err => logger.error("[aegis] MCP connect failed", err));
+      readiness.markReady("synopsis");
+      mcp.connect()
+        .then(() => readiness.markReady("mcp"))
+        .catch(err => logger.error("[aegis] MCP connect failed", err));
     },
   });
 
@@ -183,11 +191,11 @@ export async function serve(rawConfig: unknown, opts: ServeOptions): Promise<voi
   }
 
   const subscribers = subscribeWebhookEnqueue(liveCodeHosts, queue, bus, metrics, logger);
-  const polling = startPolling(liveCodeHosts, configStore, queue, bus, metrics, logger);
+  const polling = startPolling(liveCodeHosts, configStore, queue, bus, metrics, readiness, logger);
   const workerLoop = startWorkerLoop(queue, worker, gitSync, bus, metrics, configStore, liveCodeHosts, liveChats, logger);
   notifyOnReview(bus, configStore, liveChats, logger);
 
-  const httpServer = await maybeStartHttpServer(cfg, secrets, metrics, queue, worker, configStore, liveCodeHosts, logger);
+  const httpServer = await maybeStartHttpServer(cfg, secrets, metrics, queue, worker, configStore, readiness, liveCodeHosts, logger);
 
   logger.info("[aegis] running");
 
@@ -215,6 +223,7 @@ async function maybeStartHttpServer(
   queue: Queue,
   worker: AgentWorker,
   configStore: ConfigStore,
+  readiness: ReadinessGate,
   liveCodeHosts: CodeHostAdapter[],
   logger: Logger,
 ): Promise<HttpServer | null> {
@@ -238,6 +247,7 @@ async function maybeStartHttpServer(
     dlq: queue.listDlq(50),
     audit: queue.recentAudit(50),
     reload: configStore.getStatus(),
+    startup: { ready: readiness.isReady(), pending: readiness.pending() },
   });
 
   const server = new HttpServer({
@@ -247,6 +257,7 @@ async function maybeStartHttpServer(
     webhooks: webhookRoutes,
     metrics: () => metrics.render(),
     dashboard,
+    readinessGate: readiness,
     ...(cfg.http.metricsTokenEnv ? { metricsToken: secrets.get(cfg.http.metricsTokenEnv) } : {}),
   });
   await server.start();
@@ -290,10 +301,11 @@ function subscribeWebhookEnqueue(
 
 interface PollingHandle { stop(): void }
 
-function startPolling(hosts: CodeHostAdapter[], configStore: ConfigStore, queue: Queue, bus: EventBus, metrics: Metrics, logger: Logger): PollingHandle {
+function startPolling(hosts: CodeHostAdapter[], configStore: ConfigStore, queue: Queue, bus: EventBus, metrics: Metrics, readiness: ReadinessGate, logger: Logger): PollingHandle {
   // Each adapter polls on its own schedule. The interval is read fresh from the
   // adapter's getSpec() each tick so a hot-reloaded pollIntervalSec takes effect
-  // on the next iteration.
+  // on the next iteration. The first cycle is delayed until the readiness gate
+  // opens (ADR 0016) so we do not enqueue jobs before MCP is connected.
   const timeouts = new Map<string, NodeJS.Timeout>();
   let stopped = false;
 
@@ -322,10 +334,15 @@ function startPolling(hosts: CodeHostAdapter[], configStore: ConfigStore, queue:
         timeouts.set(host.id, setTimeout(() => void poll(), intervalSec * 1000));
       }
     };
-    void poll();
+
+    // Defer the first poll cycle until the readiness gate opens.
+    readiness.whenReady().then(() => {
+      if (stopped) return;
+      logger.info(`[aegis] readiness reached, starting poll loop for ${host.id}`);
+      void poll();
+    });
   }
 
-  // Suppress unused param warning - configStore reserved for future per-host overrides.
   void configStore;
 
   return {
