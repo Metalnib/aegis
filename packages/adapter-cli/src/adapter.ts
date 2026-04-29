@@ -39,6 +39,7 @@ export class CliChatAdapter extends ChatAdapterBase {
 
   private commandHandlers: Array<(c: ChatCommand) => void> = [];
   private rl?: readline.Interface;
+  private isDisposed = false;
   private cfg: Required<Omit<CliChatConfig, "banner">> & { banner?: string };
 
   constructor(cfg: CliChatConfig) {
@@ -65,6 +66,10 @@ export class CliChatAdapter extends ChatAdapterBase {
     });
 
     this.rl.on("line", (line) => {
+      // readline may deliver a queued line after rl.close() returns. Drop
+      // anything that arrives post-dispose so we don't fire commandHandlers
+      // on an adapter that the supervisor is tearing down.
+      if (this.isDisposed) return;
       const text = line.trim();
       if (!text) {
         this.writePrompt();
@@ -94,7 +99,9 @@ export class CliChatAdapter extends ChatAdapterBase {
   }
 
   async dispose(): Promise<void> {
+    this.isDisposed = true;
     this.rl?.close();
+    this.commandHandlers = [];
   }
 
   getSpec(): ChatSpec {

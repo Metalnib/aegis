@@ -104,19 +104,21 @@ test("delayRetry sets not_before; claim respects it", async () => {
 });
 
 test("delayRetry DLQs after MAX_DEFERS consecutive defers", () => {
+  // Use -60 so not_before is comfortably in the past and claim() always
+  // succeeds on the next iteration. With retryAfterSec = 0 the test would
+  // depend on Date.now() advancing between calls and could flake on systems
+  // where back-to-back calls return identical timestamps.
   const job = q.enqueue(refA1);
   assert.ok(job);
 
-  // First MAX_DEFERS-1 defers should return "deferred"
   for (let i = 0; i < Queue.MAX_DEFERS - 1; i++) {
-    q.claim(3);
-    const outcome = q.delayRetry(job.id, 0);
+    q.claim(100);
+    const outcome = q.delayRetry(job.id, -60);
     assert.equal(outcome, "deferred", `defer ${i + 1} should be deferred`);
   }
 
-  // Final defer should DLQ
-  q.claim(3);
-  const final = q.delayRetry(job.id, 0);
+  q.claim(100);
+  const final = q.delayRetry(job.id, -60);
   assert.equal(final, "dlq", "final defer should DLQ");
 
   const dlq = q.listDlq(10);
