@@ -294,3 +294,42 @@ interface CommonAdapterOptions {
   id?: string;              // override default id
 }
 ```
+
+## Running locally without Docker
+
+Aegis assumes container paths by default. To run from a built workspace
+against a local clone of repos, override the path fields:
+
+```ts
+export default defineConfig({
+  workspace: "/Users/me/work/my-org",          // existing repos checkouts
+  dbPath: "/Users/me/.aegis/aegis.db",
+  skillsDir: "/path/to/dotnet-episteme-skills/skills",
+  soulPath: "/path/to/aegis/SOUL.md",
+  synopsis: {
+    transport: "unix",
+    path: "/tmp/aegis-synopsis.sock",
+    bin: "/path/to/dotnet-techne-synopsis/bin/osx-arm64/synopsis",
+    stateDir: "/Users/me/.aegis/synopsis",
+  },
+  // ... rest of config
+});
+```
+
+For interactive testing without Slack, use the `cli` chat adapter
+(`@aegis/adapter-cli`). It reads commands from stdin and writes replies
+to stdout - the same `@aegis review ...` command surface, but local.
+
+```ts
+import { cli } from "@aegis/adapter-cli";
+
+chats: [
+  cli({ permission: "admin" }),
+],
+```
+
+Run with:
+
+```bash
+node packages/cli/dist/bin.js serve aegis.config.js
+```

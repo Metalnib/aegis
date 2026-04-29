@@ -12,6 +12,19 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/adapter-cli:
+    dependencies:
+      '@aegis/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      typescript:
+        specifier: '*'
+        version: 5.9.3
+
   packages/adapter-gchat:
     dependencies:
       '@aegis/sdk':
