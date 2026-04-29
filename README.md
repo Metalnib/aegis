@@ -6,17 +6,16 @@ An autonomous AI code-review agent for .NET microservice fleets.
 
 ---
 
-## The problem
+The Problem
+-----------
 
-The pull request queue never empties anymore. AI agents generate implementations in minutes and code review is supposed to happen the same afternoon. In practice it doesn't, not the kind that matters. The code compiles, the tests pass, and it ships.
+The pull request queue never empties anymore. AI agents generate implementations in minutes, the code compiles, tests pass, and it ships. The loop is not the hard part.
 
-What ships with it is harder to see. A missed CancellationToken that causes requests to hang under backpressure. A contract change in one service that quietly breaks two others whose teams find out three deploys later. A buffer with no bound that works fine in testing and falls over at 10x load. Not the kind of bugs static analysis catches. The kind that only appear when the whole system is moving.
+The hard part is the verifier. Not a test suite. The artifact that encodes what your system actually means by correct. In a microservice fleet, a field rename in one service can silently break three downstream consumers. A buffer with no bound works fine in testing and falls over at 10x load. A contract changes without a deprecation path, breaking every caller that hasn't recompiled. These are not the kinds of bugs static analysis catches. They are the kinds engineers catch, the ones who have spent years on these systems and carry the blast radius of a change in their heads before they write the first line.
 
-In a microservice fleet, the blast radius of a change is rarely visible from the PR. The reviewer sees the diff. They don't see the eight downstream clients consuming the endpoint that just changed shape.
+That knowledge doesn't live in any tool. It lives in people. Company knowledge, system design intuition built over years. And when those people are reviewing a hundred AI-generated PRs a week, it doesn't transfer.
 
-Existing review tools don't help much here. CodeRabbit, Sourcery and their peers are diff-only (they see what changed in this PR, not what it touches across the rest of your system). They cannot tell you which of your other fourteen services depend on the interface you just refactored. The best studies of these tools put their real-world bug detection rate around 46-48%.
-
-Some engineers prefer quality over speed. They spend time thinking through designs, tracing dependencies, asking whether a change is actually correct before asking whether it compiles. That is the kind of review that catches what matters. Most teams don't have the bandwidth or the .NET depth to do it at scale. Aegis is an attempt to automate that standard and make it accessible, in the hope that more people will see it is worth caring about.
+Aegis is a first step. It provides the infrastructure: a live cross-repo dependency graph, an LLM that reasons about real facts instead of guessing from diffs, and a skill system where domain rules can be encoded and applied to every PR automatically. The second step is engineers with taste and know-how, willing to bring what they know into it, in the hope that what they have learned doesn't have to be re-learned every time a team changes.
 
 ---
 
