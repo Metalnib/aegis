@@ -1,68 +1,40 @@
-# Aegis
+Aegis
+=====
 
-> The shield of Zeus, in TypeScript form.
-> An autonomous AI code-review agent for .NET microservice fleets.
+The shield of Zeus, in TypeScript form.
+An autonomous AI code-review agent for .NET microservice fleets.
 
-Aegis watches your pull requests across many repositories, reviews them
-with LLMs that can actually reason about your codebase, and tells you
-when a "small" change in one service is about to silently break three
-others.
+---
 
-## Why this project exists
+The pull request queue never empties anymore. AI agents generate implementations in minutes and code review is supposed to happen the same afternoon. In practice it doesn't, not the kind that matters. The code compiles, the tests pass, and it ships.
 
-Modern .NET shops live in microservice fleets. A field rename in one
-repo travels through HTTP clients, EF Core projections, and integration
-tests across half-a-dozen others - and the PR author can't see any of
-it from their local checkout.
+What ships with it is harder to see. A missed CancellationToken that causes requests to hang under backpressure. A contract change in one service that quietly breaks two others whose teams find out three deploys later. A buffer with no bound that works fine in testing and falls over at 10x load. Not the kind of bugs static analysis catches. The kind that only appear when the whole system is moving.
 
-Code reviewers can't either. Static analyzers stop at the project
-boundary. LLM-only review tools see one diff and hallucinate the rest.
+In a microservice fleet, the blast radius of a change is rarely visible from the PR. The reviewer sees the diff. They don't see the eight downstream clients consuming the endpoint that just changed shape.
 
-Aegis takes a different shape:
+Existing review tools don't help much here. CodeRabbit, Sourcery and their peers are diff-only (they see what changed in this PR, not what it touches across the rest of your system). They cannot tell you which of your other fourteen services depend on the interface you just refactored. The best studies of these tools put their real-world bug detection rate around 46-48%.
 
-- **A real graph, not a vibe.** A sister project, [Synopsis][synopsis],
-  parses every watched repo with Roslyn and builds a typed cross-repo
-  dependency graph: HTTP routes, EF entities, NuGet symbols. Aegis
-  hands the LLM **classified facts** (breaking-change kinds, certainty
-  levels) rather than raw code and crossed fingers.
-- **The LLM reasons, the graph doesn't.** Synopsis says *what changed
-  and what depends on it.* The agent decides *whether it matters and
-  what to recommend.* Hallucinations have nowhere to land - the facts
-  are in the graph.
-- **Autonomous, not advisory.** When a PR opens, Aegis reviews it
-  within seconds (webhooks) or a minute (polling fallback), posts
-  inline review comments on the PR, attaches a
-  `cross-repo-impact.md` report, and pings Slack / Google Chat on
-  Critical / High severity.
-- **Operable.** Single Docker image. Embedded HTTP server with a
-  Prometheus `/metrics` endpoint, `/healthz`, and a read-only HTML
-  dashboard. Helm chart for k8s. SQLite for state - no Redis, no
-  sidecars.
+Some engineers prefer quality over speed. They spend time thinking through designs, tracing dependencies, asking whether a change is actually correct before asking whether it compiles. That is the kind of review that catches what matters. Most teams don't have the bandwidth or the .NET depth to do it at scale. Aegis is an attempt to automate that standard and make it accessible, in the hope that more people will see it is worth caring about.
 
-## What it does
+---
 
-- **Polls and webhooks.** GitHub and GitLab adapters poll every 60s
-  and also accept webhooks (HMAC-SHA256 / token-verified) for instant
-  intake.
-- **Reviews each PR with skills.** The agent loads
-  [`dotnet-techne-*` skills][skills] - cross-repo impact, code
-  review, CRAP analysis, Synopsis querying - runs the review against
-  the diff plus live MCP queries against Synopsis, and produces a
-  structured finding list with severity.
-- **Posts results back.** Inline PR review (`REQUEST_CHANGES` on
-  Critical / High; `COMMENT` otherwise). Markdown blast-radius report
-  as a separate PR comment. Slack / Google Chat notifications on
-  Critical / High.
-- **Is interactive.** Bot commands from chat:
-  - `review <pr-url>` ad-hoc review
-  - `impact <symbol>` / `callers <symbol>` / `paths <a> <b>` Synopsis queries
-  - `endpoints` / `db <entity>` / `ambiguous` graph queries
-  - `repos` / `watch <repo>` / `unwatch <repo>` runtime monitoring
-  - `dlq` / `requeue <id>` / `cancel <id>` queue ops
-  - `model` / `providers` / `model <provider> <id>` swap LLMs at runtime
-  - `status` / `rescan <repo>` operational
+How it works
+------------
 
-## Architecture in 30 seconds
+Other tools look at the diff. Aegis looks at the system.
+
+A sister project ([Synopsis](https://github.com/Metalnib/dotnet-episteme-skills/tree/main/src/synopsis)) parses every watched repository with Roslyn and builds a live cross-repo dependency graph: HTTP routes, EF Core entity mappings, NuGet symbols, message brokers, service-to-service call chains. When a PR opens, Aegis doesn't guess what the change touches. It asks the graph. The graph answers with classified facts (breaking-change kinds, certainty levels, affected callers across repositories), and hands those facts to the LLM.
+
+The LLM reasons. The graph doesn't hallucinate.
+
+Aegis watches pull requests across GitHub and GitLab (polling every 60s, webhook intake for instant reviews), runs the review against the diff plus live graph queries, then posts inline PR review comments, attaches a blast-radius report, and pings Slack or Google Chat on Critical and High findings.
+
+It is also interactive. From Slack or Google Chat you can trigger ad-hoc reviews, query the graph directly (blast radius, call paths, endpoint callers, database lineage), manage watched repos at runtime, handle failed jobs in the queue, and swap the underlying LLM without restarting anything. Anthropic, OpenAI, Google, Mistral, anything the Pi Agent runtime supports, all switchable with one chat command.
+
+---
+
+Architecture in 30 seconds
+---------------------------
 
 ```
 PRs --+- poll ----> Queue (SQLite) ----> Agent worker pool ----> Synopsis (MCP/UDS)
@@ -72,22 +44,19 @@ PRs --+- poll ----> Queue (SQLite) ----> Agent worker pool ----> Synopsis (MCP/U
                                                Google / Mistral / ...)
 ```
 
-- **Pi Agent** ([pi-mono][pi]) drives the LLM loop and tool execution.
-- **MCP** ([Model Context Protocol][mcp]) talks to Synopsis over a
-  Unix domain socket. Synopsis exposes 9 tools (impact, paths,
-  endpoints, reindex, etc.) discovered dynamically.
-- **Multi-provider.** Anthropic, OpenAI, Google, Mistral, anything
-  Pi-supported. Switchable at runtime via chat; per-provider
-  concurrency caps; adaptive 429 backoff so rate-limited jobs defer
-  without burning retries.
+Pi Agent ([pi-mono][pi]) drives the LLM loop and tool execution. Synopsis talks to the agent over a Unix domain socket using the Model Context Protocol. Everything runs in a single Docker image with an embedded HTTP server (Prometheus metrics, healthz, read-only HTML dashboard), SQLite for state, no Redis, no sidecars.
 
-## Quick start (Docker)
+---
+
+Quick start (Docker)
+--------------------
 
 ```bash
-# 1. Build the image (uses dotnet-episteme-skills as build context)
+# 1. Build the image
 ./scripts/build-docker.sh
 
-# 2. Edit aegis.config.example.ts -> aegis.config.ts (org, repos, secrets)
+# 2. Copy and edit the example config
+cp aegis.config.example.ts aegis.config.ts
 
 # 3. Run
 docker run -d --name aegis \
@@ -102,14 +71,17 @@ docker run -d --name aegis \
   -e SLACK_APP_TOKEN=$SLACK_APP_TOKEN \
   aegis:0.1.0
 
-# 4. Visit http://localhost:8080 for the dashboard
-#    /metrics for Prometheus
-#    /webhooks/github for GitHub webhook intake
+# Dashboard:  http://localhost:8080/dashboard
+# Metrics:    http://localhost:8080/metrics
+# Webhooks:   http://localhost:8080/webhooks/github
 ```
 
-For Kubernetes, see [`helm/aegis/`](helm/aegis/README.md).
+For Kubernetes see [helm/aegis/](helm/aegis/README.md).
 
-## Repository layout
+---
+
+Repository layout
+-----------------
 
 ```
 packages/
@@ -128,70 +100,33 @@ docs/              Architecture, ADRs, deployment, configuration, roadmap
 scripts/           build, test-e2e
 ```
 
-## Docs
-
-| Doc | What's in it |
-|---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, diagram, event flow |
-| [CONFIGURATION.md](docs/CONFIGURATION.md) | `aegis.config.ts` schema |
-| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Single-image Docker + Helm |
-| [CHAT_COMMANDS.md](docs/CHAT_COMMANDS.md) | Bot command catalog |
-| [adapters.md](docs/adapters.md) | Adapter SPI and writing your own |
-| [SKILL_CROSS_REPO_IMPACT.md](docs/SKILL_CROSS_REPO_IMPACT.md) | Soul skill spec |
-| [ROADMAP.md](docs/ROADMAP.md) | Phased delivery, what shipped |
-| [DECISIONS.md](docs/DECISIONS.md) + [adr/](docs/adr/) | Architecture decision records |
-| [aegis.config.example.ts](aegis.config.example.ts) | Annotated sample config |
-
-## Relationship to dotnet-episteme-skills
-
-Aegis **consumes** [`dotnet-episteme-skills`][skills-repo] at build
-time:
-
-- **Synopsis binary** is built from
-  `dotnet-episteme-skills/src/synopsis` and bundled into the Aegis
-  Docker image.
-- **Review skills** (`dotnet-techne-*` directories) are copied into
-  the image at `/opt/aegis/skills/`.
-
-`dotnet-episteme-skills` stays **standalone** - usable from Claude
-Code, manual workflows, or other agents. Aegis is the consumer, not a
-dependency.
-
-## Status
-
-Aegis 1.0.0 is feature-complete. P0 (Synopsis upgrade) + P1 (MVP) +
-P2 (multi-host) + P3 (production hardening) all shipped. See
-[ROADMAP.md](docs/ROADMAP.md) for the breakdown. P4 (ecosystem - more
-adapters, plugin template, public SDK on npm) is next.
-
-## Name
-
-Aegis (Αἰγίς) - the shield of Zeus. Defensive framing: Aegis guards
-the microservice fleet against breaking changes crossing repo
-boundaries.
+Docs: [ARCHITECTURE.md](docs/ARCHITECTURE.md), [CONFIGURATION.md](docs/CONFIGURATION.md), [DEPLOYMENT.md](docs/DEPLOYMENT.md), [CHAT_COMMANDS.md](docs/CHAT_COMMANDS.md), [ROADMAP.md](docs/ROADMAP.md). Annotated config example in [aegis.config.example.ts](aegis.config.example.ts).
 
 ---
 
-## Bonus track
-
-Listening fuel for late-night refactors:
-[https://youtu.be/3uPXkcE-mC4](https://youtu.be/3uPXkcE-mC4)
+Aegis consumes [dotnet-episteme-skills][skills-repo] at build time. The Synopsis binary is compiled from that repo and bundled into the Docker image and the review skills are copied into the image at /opt/aegis/skills/. dotnet-episteme-skills stays standalone, usable from Claude Code or any other agent independently.
 
 ---
 
-## License & attribution
+Aegis 1.0.0 is feature-complete. P0 through P3 (Synopsis integration, MVP, multi-host, production hardening) all shipped. P4 (more adapters, plugin template, public SDK) is next.
 
-Copyright (c) 2026 [Metalnib](https://github.com/Metalnib). Licensed
-under the [MIT License](LICENSE).
+Aegis (Αιγις) is the shield of Zeus. Defensive framing: it guards the microservice fleet against breaking changes crossing repo boundaries.
 
-Built on top of:
+---
 
-- **[pi-mono][pi]** by Mario Zechner - TypeScript agent runtime (MIT).
-- **[Model Context Protocol SDK][mcp]** by Anthropic (MIT).
-- **[Roslyn][roslyn]**, **[MSBuild][msbuild]** by the .NET Foundation (MIT).
-- **[Node.js][node]** by the OpenJS Foundation (MIT).
+Bonus track
+-----------
 
-Full attribution and forked-file conventions in [NOTICE](NOTICE).
+Listening fuel for late-night refactors: [https://youtu.be/3uPXkcE-mC4](https://youtu.be/3uPXkcE-mC4)
+
+---
+
+License and attribution
+-----------------------
+
+Copyright (c) 2026 [Metalnib](https://github.com/Metalnib). Licensed under the [MIT License](LICENSE).
+
+Built on top of [pi-mono][pi] by Mario Zechner (MIT), the [Model Context Protocol SDK][mcp] by Anthropic (MIT), [Roslyn][roslyn] and [MSBuild][msbuild] by the .NET Foundation (MIT), and [Node.js][node] by the OpenJS Foundation (MIT). Full attribution in [NOTICE](NOTICE).
 
 [synopsis]: https://github.com/Metalnib/dotnet-episteme-skills/tree/main/src/synopsis
 [skills]: https://github.com/Metalnib/dotnet-episteme-skills/tree/main/skills
