@@ -37,7 +37,7 @@ export async function serve(rawConfig: unknown, opts: ServeOptions): Promise<voi
 
   const mcp = new SynopsisMcpClient(cfg.synopsis.path ?? "/var/run/aegis/synopsis.sock", logger);
 
-  const synopsisBin = process.env["SYNOPSIS_BIN"] ?? "/opt/aegis/bin/synopsis";
+  const synopsisBin = cfg.synopsis.bin ?? process.env["SYNOPSIS_BIN"] ?? "/opt/aegis/bin/synopsis";
   const synopsisArgs = buildSynopsisArgs(cfg);
   const supervisor = new Supervisor({
     command: synopsisBin,
@@ -513,7 +513,7 @@ function readChatSpec(chat: ChatAdapter): ChatSpec | null {
 
 function buildSynopsisArgs(cfg: AegisConfig): string[] {
   const { synopsis } = cfg;
-  const args = ["mcp", "--root", cfg.workspace, "--state-dir", "/var/lib/aegis/synopsis"];
+  const args = ["mcp", "--root", cfg.workspace, "--state-dir", synopsis.stateDir];
   if (synopsis.transport === "unix" && synopsis.path) {
     args.push("--socket", synopsis.path);
   } else if (synopsis.transport === "tcp" && synopsis.host && synopsis.port) {

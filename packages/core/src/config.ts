@@ -6,6 +6,19 @@ export const SynopsisConfigSchema = z.object({
   path: z.string().optional(),
   host: z.string().optional(),
   port: z.number().optional(),
+  /**
+   * Path to the Synopsis binary the supervisor should spawn. Defaults to
+   * the bundled location inside the Aegis container. Override for local
+   * dev (e.g. /Users/me/.../skills/dotnet-techne-synopsis/bin/osx-arm64/synopsis).
+   * Env var `SYNOPSIS_BIN` still works as a fallback for backwards compat.
+   */
+  bin: z.string().optional(),
+  /**
+   * Where Synopsis writes its incremental scan state. Default writeable
+   * location for the production container is `/var/lib/aegis/synopsis`.
+   * For local dev, point this at a path you can write to.
+   */
+  stateDir: z.string().default("/var/lib/aegis/synopsis"),
 });
 
 /**

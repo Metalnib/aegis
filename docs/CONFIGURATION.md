@@ -21,10 +21,14 @@ export default defineConfig({
   // Where repos are cloned inside the container.
   workspace: "/workspace",
 
-  // Synopsis daemon connection (inside the single image, a unix socket).
+  // Synopsis daemon connection. The supervisor spawns Synopsis as a child
+  // process and connects via unix socket. Inside the Docker image the binary
+  // and state-dir defaults are correct; override these for local dev.
   synopsis: {
     transport: "unix",
     path: "/var/run/aegis/synopsis.sock",
+    // bin: "/path/to/synopsis",                  // local dev override
+    // stateDir: "/var/lib/aegis/synopsis",       // default; override for local dev
   },
 
   // LLM agent.
@@ -202,6 +206,8 @@ aegis config validate [aegis.config.js]
 | `workspace` | `/workspace` |
 | `synopsis.transport` | `unix` |
 | `synopsis.path` | `/var/run/aegis/synopsis.sock` |
+| `synopsis.bin` | `/opt/aegis/bin/synopsis` (or `$SYNOPSIS_BIN` env var) |
+| `synopsis.stateDir` | `/var/lib/aegis/synopsis` |
 | `agent.provider` | `anthropic` |
 | `agent.model` | `claude-opus-4-7` |
 | `agent.concurrency` | `4` |
