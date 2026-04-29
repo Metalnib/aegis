@@ -76,31 +76,36 @@ export class Queue {
    * (`host/owner/repo`) that must be skipped, used by the worker loop to
    * enforce per-repo serialization: jobs for a repo already in flight do
    * not get a second worker.
+   *
+   * Uses a single atomic UPDATE...WHERE id=(SELECT...) RETURNING * so the
+   * select-and-flip-status step cannot race - critical if we ever go
+   * multi-process or introduce an async boundary between SELECT and UPDATE.
    */
   claim(maxAttempts: number, excludeRepoFqns?: ReadonlyArray<string>): ReviewJob | null {
     const now = new Date().toISOString();
     const exclude = excludeRepoFqns && excludeRepoFqns.length > 0 ? excludeRepoFqns : null;
     const placeholders = exclude ? exclude.map(() => "?").join(",") : "";
     const sql = `
-      SELECT * FROM review_jobs
-      WHERE status = 'pending'
-        AND attempts < ?
-        AND (not_before IS NULL OR not_before <= ?)
-        ${exclude ? `AND (host || '/' || owner || '/' || repo) NOT IN (${placeholders})` : ""}
-      ORDER BY enqueued_at ASC
-      LIMIT 1
+      UPDATE review_jobs
+        SET status = 'running',
+            attempts = attempts + 1,
+            claimed_at = ?
+      WHERE id = (
+        SELECT id FROM review_jobs
+        WHERE status = 'pending'
+          AND attempts < ?
+          AND (not_before IS NULL OR not_before <= ?)
+          ${exclude ? `AND (host || '/' || owner || '/' || repo) NOT IN (${placeholders})` : ""}
+        ORDER BY enqueued_at ASC
+        LIMIT 1
+      )
+      RETURNING *
     `;
-    const params: (string | number)[] = [maxAttempts, now];
+    const params: (string | number)[] = [now, maxAttempts, now];
     if (exclude) params.push(...exclude);
     const row = this.db.prepare(sql).get(...params) as RawRow | undefined;
 
     if (!row) return null;
-
-    this.db.prepare(`
-      UPDATE review_jobs SET status = 'running', attempts = attempts + 1, claimed_at = ? WHERE id = ?
-    `).run(now, row.id);
-
-    row.attempts += 1;
     return rowToJob(row);
   }
 

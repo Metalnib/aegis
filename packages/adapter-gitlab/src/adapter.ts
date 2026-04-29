@@ -432,12 +432,16 @@ function mrToRef(host: string, owner: string, repo: string, mr: GitLabMr): PrRef
   return { host, owner, repo, number: mr.iid, headSha: mr.sha };
 }
 
-/** Constant-time string comparison; safe for verifying GitLab's plain-token auth. */
+/**
+ * Constant-time string comparison that does not leak the length of either
+ * input. We HMAC both inputs with a per-call random key, then compare the
+ * fixed-size HMACs - input length no longer affects timing.
+ */
 function constantTimeStringEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
+  const key = crypto.randomBytes(32);
+  const aMac = crypto.createHmac("sha256", key).update(a).digest();
+  const bMac = crypto.createHmac("sha256", key).update(b).digest();
+  return crypto.timingSafeEqual(aMac, bMac);
 }
 
 function buildNoteBody(review: AegisReview): string {

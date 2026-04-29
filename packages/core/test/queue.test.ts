@@ -134,3 +134,18 @@ test("recoverOrphaned resets running jobs to pending", () => {
   const reclaimed = q.claim(3);
   assert.equal(reclaimed?.id, j1?.id);
 });
+
+test("claim is atomic - status flips and attempts increments together", () => {
+  // Regression for review finding 1: claim() used to be a SELECT then a
+  // separate UPDATE. With UPDATE...WHERE id=(SELECT...) RETURNING * the
+  // status flip and attempts++ are observed together.
+  const j = q.enqueue(refA1);
+  assert.ok(j);
+  const claimed = q.claim(3);
+  assert.ok(claimed);
+  assert.equal(claimed.id, j.id);
+  assert.equal(claimed.attempts, 1, "attempts incremented atomically with status flip");
+
+  // Re-claim same job: should not be re-claimable until pending again.
+  assert.equal(q.claim(3), null, "running job not claimable");
+});

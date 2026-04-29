@@ -130,11 +130,18 @@ function send(res: http.ServerResponse, status: number, body: string, contentTyp
   res.end(body);
 }
 
+/**
+ * Constant-time string equality that does not leak the length of either
+ * input via timing. Naive `if (a.length !== b.length) return false` reveals
+ * the secret length to an attacker who can vary their input. We HMAC both
+ * inputs with a per-call random key, then compare the fixed-size HMACs:
+ * input length no longer affects the time-to-decision.
+ */
 function constantTimeStringEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
+  const key = crypto.randomBytes(32);
+  const aMac = crypto.createHmac("sha256", key).update(a).digest();
+  const bMac = crypto.createHmac("sha256", key).update(b).digest();
+  return crypto.timingSafeEqual(aMac, bMac);
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {

@@ -96,21 +96,10 @@ export class AgentWorker {
     const applied: string[] = [];
     const old = this.currentConfig;
 
-    // Swap the live snapshot first so resolveModel() sees the new providers.
-    this.currentConfig = next;
-
-    if (old.providerLimits !== next.providerLimits || old.concurrency !== next.concurrency) {
-      // Recreate any semaphore whose cap changed. New jobs use the new cap; in-flight
-      // jobs hold the old permit until release. Capacity contraction can over-subscribe
-      // briefly, but never wedges, because release() does not check the cap.
-      const oldCaps = new Map<string, number>();
-      for (const [p, sem] of this.semaphores) oldCaps.set(p, (sem as unknown as { capacity: number }).capacity ?? 0);
-      this.semaphores.clear();
-      applied.push("concurrency", "providerLimits");
-    }
-
-    // If the active model points to a custom provider that was removed, drop the
-    // saved override and revert to the default.
+    // Compute everything that can throw BEFORE mutating any state. If the
+    // fallback model fails to build, we throw cleanly without leaving the
+    // worker in a half-applied state (currentConfig new, active stale).
+    let pendingActive = this.active;
     let droppedOverride: { provider: string; modelId: string; reason: string } | null = null;
     const activeIsCustom = !!old.customProviders[this.active.provider];
     const stillExists = !!next.customProviders[this.active.provider];
@@ -120,16 +109,37 @@ export class AgentWorker {
         modelId: this.active.modelId,
         reason: `customProvider "${this.active.provider}" was removed from config`,
       };
-      await this.opts.store.delete(MODEL_OVERRIDE_KEY);
-      const fallbackProvider = next.customProviders[next.provider] ? next.provider : next.provider;
-      const fallbackModel = next.customProviders[fallbackProvider] ? next.model : next.model;
       try {
-        this.active = buildActive(fallbackProvider, fallbackModel, next);
-        this.opts.logger.warn(`[agent] dropped saved override ${droppedOverride.provider}/${droppedOverride.modelId}, reverted to ${fallbackProvider}/${fallbackModel}`);
+        pendingActive = buildActive(next.provider, next.model, next);
       } catch (err) {
-        this.opts.logger.error(`[agent] failed to revert to default model after override drop: ${(err as Error).message}`);
+        // Re-throw rather than swallow. The subscriber's error handler will
+        // log this and the previous config keeps running. Without this we'd
+        // mutate currentConfig but leave `active` pointing at a removed
+        // provider, and subsequent jobs would fail opaquely.
+        throw new Error(
+          `[agent] config reload aborted: cannot revert override ` +
+          `${this.active.provider}/${this.active.modelId} to default ` +
+          `${next.provider}/${next.model}: ${(err as Error).message}`,
+        );
       }
+    }
+
+    // Commit phase: state mutations only after every fallible step succeeded.
+    this.currentConfig = next;
+
+    if (droppedOverride) {
+      await this.opts.store.delete(MODEL_OVERRIDE_KEY);
+      this.active = pendingActive;
+      this.opts.logger.warn(`[agent] dropped saved override ${droppedOverride.provider}/${droppedOverride.modelId}, reverted to ${next.provider}/${next.model}`);
       applied.push("activeModel");
+    }
+
+    if (old.providerLimits !== next.providerLimits || old.concurrency !== next.concurrency) {
+      // Drop existing semaphores so the next acquire rebuilds them with new caps.
+      // In-flight jobs hold the old permit until release. Capacity contraction can
+      // over-subscribe briefly but never wedges because release() does not check the cap.
+      this.semaphores.clear();
+      applied.push("concurrency", "providerLimits");
     }
 
     if (old.jobTimeoutSec !== next.jobTimeoutSec) applied.push("jobTimeoutSec");
