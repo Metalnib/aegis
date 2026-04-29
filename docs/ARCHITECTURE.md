@@ -163,6 +163,55 @@ content itself.
 | LLM provider unavailable | Worker parks job, backs off; chat adapters notify on sustained outage. |
 | SQLite corruption | Hard fail with log; queue is disposable, replay from adapter cursor on restart. |
 
+## Startup readiness
+
+Aegis has three subsystems that must come up in order before it accepts work:
+
+1. SQLite state (queue, audit, KV) opens immediately on construction. Cheap.
+2. Synopsis daemon. The Supervisor spawns it as a child process. Ready when
+   the `MCP server listening` line appears on its stdout.
+3. MCP client connection. Opens once Synopsis is ready.
+
+The cold-scan time of the Synopsis daemon is the dominant factor. It scales
+with workspace size, project count, NuGet restore cost, and the underlying
+disk and CPU speed. A small fleet on fast hardware comes up in tens of
+seconds. A 20-service fleet on a constrained VM can take several minutes.
+Operators tune the Helm `startupProbe` accordingly. The chart default is
+generous (10 minutes total tolerance) because underestimating causes pod
+restart-flapping during boot, while overestimating only delays failure
+detection at startup time, which is cheap compared to the cost of a flap
+loop.
+
+### The not-ready window
+
+Until all three subsystems are up, Aegis declares itself "not ready":
+
+- `/healthz` returns `503 not-ready` with a JSON body listing pending
+  subsystems.
+- The webhook router responds with `503 starting` to inbound POSTs.
+- Polling does not run. The first poll cycle starts after ready.
+- The dashboard shows a "Starting" banner listing pending subsystems.
+
+A single shared "ready" gate controls all four behaviors. There is no
+per-subsystem partial readiness.
+
+### Tradeoff: 503 vs buffer-and-replay
+
+We chose to return 503 over buffering inbound webhooks for replay once
+ready. 503 is simpler, has no in-memory loss surface (a process crash
+during the not-ready window cannot drop buffered events the upstream has
+already moved past), and leans on the retry behavior the upstream already
+implements. GitHub and GitLab both retry 5xx with exponential backoff, so
+events arriving in this window are deferred to the delivering host's next
+attempt rather than lost.
+
+The cost: webhook deliveries during a deploy show as failed retries in
+the upstream UI, which can confuse a first-time operator watching their
+GitHub webhook page. We may revisit if we ever onboard a host that does
+not retry, if buffering becomes cheap because we add a durable inbound
+queue for other reasons, or if upstream retry visibility becomes a real
+operator-experience complaint.
+
 ## Security surface (MVP)
 
 - Single-tenant, single-org deployment assumed.

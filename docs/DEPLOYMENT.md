@@ -81,6 +81,18 @@ entrypoint.sh
 - **Logs:** both Aegis and Synopsis log JSON lines to stdout. Container
   logging captures everything.
 
+### Startup probe
+
+The startup probe absorbs the Synopsis cold-scan time. Helm chart
+defaults: `initialDelaySeconds=10`, `periodSeconds=10`,
+`failureThreshold=60` (10 minutes total tolerance). For larger workspaces
+or constrained hardware, raise `failureThreshold`. Underestimating
+triggers restart-flapping; the asymmetry favors generosity.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) "Startup readiness" for the
+contract: what subsystems must be up, how `/healthz` and webhook intake
+behave during boot, and the 503-vs-buffer tradeoff.
+
 ## Volumes
 
 | Mount | Purpose | Persist? |
