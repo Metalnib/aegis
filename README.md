@@ -52,30 +52,41 @@ Pi Agent ([pi-mono][pi]) drives the LLM loop and tool execution. Synopsis talks 
 Quick start (Docker)
 --------------------
 
+Build the image (uses dotnet-episteme-skills as a build context):
+
 ```bash
-# 1. Build the image
-./scripts/build-docker.sh
+docker build --build-context build-context=.. -f docker/Dockerfile -t aegis:0.1 .
+```
 
-# 2. Copy and edit the example config
-cp aegis.config.example.ts aegis.config.ts
+Write your `aegis.config.ts` (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full schema, the bundled `aegis.config.example.ts` is a good starting point), then compile it to `aegis.config.js`.
 
-# 3. Run
+Run with the env vars your config references. Example with Anthropic:
+
+```bash
 docker run -d --name aegis \
-  -v $PWD/aegis.config.ts:/opt/aegis/aegis.config.js \
+  -p 8080:8080 \
+  -v $PWD/aegis.config.js:/aegis/aegis.config.js:ro \
   -v aegis-state:/var/lib/aegis \
   -v aegis-workspace:/workspace \
-  -p 8080:8080 \
   -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
   -e GITHUB_WEBHOOK_SECRET=$GITHUB_WEBHOOK_SECRET \
   -e SLACK_BOT_TOKEN=$SLACK_BOT_TOKEN \
   -e SLACK_APP_TOKEN=$SLACK_APP_TOKEN \
-  aegis:0.1.0
-
-# Dashboard:  http://localhost:8080/dashboard
-# Metrics:    http://localhost:8080/metrics
-# Webhooks:   http://localhost:8080/webhooks/github
+  aegis:0.1
 ```
+
+Watch `/healthz` for readiness. The first cold scan of a 20-service .NET fleet takes 50 seconds or so:
+
+```bash
+curl http://localhost:8080/healthz
+# initially: {"status":"not-ready","pending":["synopsis","mcp"]}
+# eventually: ok
+```
+
+Custom LLM providers (Vultr, OpenRouter, a local Ollama, any OpenAI-compatible endpoint) plug in via `agent.customProviders` in the config. The env var name for the API key is whatever you set `apiKeyEnv` to.
+
+For interactive testing without Slack, use the `cli` chat adapter (`@aegis/adapter-cli`, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md) "Running locally without Docker").
 
 For Kubernetes see [helm/aegis/](helm/aegis/README.md).
 

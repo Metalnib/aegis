@@ -111,6 +111,57 @@ export default defineConfig({
 });
 ```
 
+## First run
+
+The minimum viable config wires up one code host, one chat adapter (or none,
+for headless mode), and one LLM provider. Everything else has sensible
+defaults.
+
+```ts
+// aegis.config.ts
+import { defineConfig } from "@aegis/core";
+import { github } from "@aegis/adapter-github";
+
+export default defineConfig({
+  agent: {
+    provider: "anthropic",
+    model: "claude-opus-4-7",
+  },
+  codeHosts: [
+    github({
+      host: "github.com",
+      org: "myorg",
+      repos: ["svc-a", "svc-b"],
+      tokenEnv: "GITHUB_TOKEN",
+    }),
+  ],
+  skills: [
+    "dotnet-techne-cross-repo-impact",
+    "dotnet-techne-code-review",
+  ],
+});
+```
+
+Compile to `aegis.config.js` and mount it into the container at
+`/aegis/aegis.config.js`. The block below is a polling-only minimum.
+For webhook intake (the fast path), also set `webhookSecretEnv` on the
+adapter and pass `GITHUB_WEBHOOK_SECRET` to the container - see the
+README quick start for the full set.
+
+```bash
+docker run -d --name aegis \
+  -p 8080:8080 \
+  -v $PWD/aegis.config.js:/aegis/aegis.config.js:ro \
+  -v aegis-state:/var/lib/aegis \
+  -v aegis-workspace:/workspace \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  -e GITHUB_TOKEN=$GITHUB_TOKEN \
+  aegis:0.1
+```
+
+See the README "Quick start (Docker)" section for the full setup, including
+the build step and the `/healthz` readiness check.
+
 ## Configuration reload (what works without restart)
 
 Aegis watches the config file and reapplies changes on the fly. Three triggers
@@ -254,6 +305,19 @@ The override persists in SQLite. On reload of a config that no longer defines
 the active custom provider, the override is dropped (see "What does NOT
 survive reload" above).
 
+Notes:
+
+- Not every model on a custom provider supports tool calling. Empirically
+  `deepseek-ai/DeepSeek-V4-Pro` and `Qwen/Qwen3.5-397B-A17B-FP8` on Vultr
+  handle the OpenAI tools schema correctly. Smaller or older models tend to
+  ignore the `tools` field on the request and produce hallucinated answers
+  that look plausible but are not grounded in any tool result. If you see
+  Aegis confidently citing call sites or types it never queried, swap to a
+  model with verified tool-calling support.
+- See [docs/notes/llm-tool-calling.md](notes/llm-tool-calling.md) for a
+  deeper write-up of how Pi Agent emits tool-call events and why we count
+  `tool_execution_*` rather than `toolcall_*`.
+
 ## Multiple instances of the same adapter
 
 Supported - each instance needs a unique `id`:
@@ -271,9 +335,15 @@ renaming an adapter (`id` change) is treated as remove + add, which is Tier 3.
 ## Configuration file location
 
 - Dev: `./aegis.config.ts` at repo root.
-- Docker: pass the path as the first argument: `aegis serve /opt/aegis/aegis.config.js`.
-  The Helm chart mounts the ConfigMap at `/opt/aegis/aegis.config.js` by default.
-  Mount the **compiled** file so the container doesn't need a TS loader.
+- Docker: mount the **compiled** `.js` file at `/aegis/aegis.config.js`.
+  The container's entrypoint reads `$AEGIS_CONFIG` and defaults to that
+  path. The mount must live under `/aegis/` because the user-authored
+  config typically does `import { github } from "@aegis/adapter-github"`,
+  and Node resolves that import via `/aegis/node_modules/@aegis/...`
+  symlinks. Mounting the config at `/etc/aegis/...` or `/opt/aegis/...`
+  will fail at config load with `MODULE_NOT_FOUND`.
+- Helm: the chart's current default mount path needs the same fix. See
+  `docs/GAPS.md` for the open item.
 
 ## Secrets
 
