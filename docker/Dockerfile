@@ -18,6 +18,7 @@ COPY packages/adapter-github/package.json ./packages/adapter-github/
 COPY packages/adapter-gitlab/package.json ./packages/adapter-gitlab/
 COPY packages/adapter-slack/package.json  ./packages/adapter-slack/
 COPY packages/adapter-gchat/package.json  ./packages/adapter-gchat/
+COPY packages/adapter-cli/package.json    ./packages/adapter-cli/
 COPY packages/cli/package.json            ./packages/cli/
 RUN pnpm install --frozen-lockfile
 COPY tsconfig.base.json ./
@@ -42,6 +43,7 @@ COPY --from=ts-build /aegis/packages/adapter-github/package.json ./packages/adap
 COPY --from=ts-build /aegis/packages/adapter-gitlab/package.json ./packages/adapter-gitlab/
 COPY --from=ts-build /aegis/packages/adapter-slack/package.json  ./packages/adapter-slack/
 COPY --from=ts-build /aegis/packages/adapter-gchat/package.json  ./packages/adapter-gchat/
+COPY --from=ts-build /aegis/packages/adapter-cli/package.json    ./packages/adapter-cli/
 COPY --from=ts-build /aegis/packages/cli/package.json            ./packages/cli/
 COPY --from=ts-build /aegis/packages/sdk/dist            ./packages/sdk/dist/
 COPY --from=ts-build /aegis/packages/core/dist           ./packages/core/dist/
@@ -50,6 +52,7 @@ COPY --from=ts-build /aegis/packages/adapter-github/dist ./packages/adapter-gith
 COPY --from=ts-build /aegis/packages/adapter-gitlab/dist ./packages/adapter-gitlab/dist/
 COPY --from=ts-build /aegis/packages/adapter-slack/dist  ./packages/adapter-slack/dist/
 COPY --from=ts-build /aegis/packages/adapter-gchat/dist  ./packages/adapter-gchat/dist/
+COPY --from=ts-build /aegis/packages/adapter-cli/dist    ./packages/adapter-cli/dist/
 COPY --from=ts-build /aegis/packages/cli/dist            ./packages/cli/dist/
 
 RUN pnpm install --prod --frozen-lockfile
