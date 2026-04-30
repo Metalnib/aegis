@@ -1,9 +1,19 @@
 # ── Stage 1: build Synopsis binary ──────────────────────────────────────────
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS synopsis-build
+# Multi-arch: pick the .NET RID matching the target platform. PublishSingleFile
+# produces a single executable instead of a directory tree, which keeps the
+# COPY into stage 4 simple.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS synopsis-build
+ARG TARGETARCH
 WORKDIR /src
 COPY --from=build-context dotnet-episteme-skills/src/synopsis ./synopsis
-RUN dotnet publish synopsis/Synopsis/Synopsis.csproj \
-      -c Release -r linux-x64 --self-contained true \
+RUN case "$TARGETARCH" in \
+      amd64) RID=linux-x64 ;; \
+      arm64) RID=linux-arm64 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" && exit 1 ;; \
+    esac && \
+    dotnet publish synopsis/Synopsis/Synopsis.csproj \
+      -c Release -r "$RID" --self-contained true \
+      -p:PublishSingleFile=true \
       -o /out/synopsis
 
 # ── Stage 2: build Aegis TypeScript packages ─────────────────────────────────
@@ -58,7 +68,7 @@ COPY --from=ts-build /aegis/packages/cli/dist            ./packages/cli/dist/
 
 RUN pnpm install --prod --frozen-lockfile
 
-COPY --from=synopsis-build /out/synopsis /opt/aegis/bin/synopsis
+COPY --from=synopsis-build /out/synopsis/synopsis /opt/aegis/bin/synopsis
 COPY --from=skills /skills /opt/aegis/skills/
 COPY SOUL.md /opt/aegis/SOUL.md
 COPY docker/entrypoint.sh /entrypoint.sh

@@ -44,7 +44,7 @@ PORT=18080
 WEBHOOK_SECRET="smoke-test-secret"
 METRICS_TOKEN="smoke-test-metrics-token"
 GITHUB_TOKEN="smoke-test-token"  # never validated against the real API in this test
-TIMEOUT_SEC=600                  # 10 minutes per ADR 0016 for cold-scan tolerance
+TIMEOUT_SEC=300                  # 5 minutes - smoke fast-fail; the 10-min ADR 0016 budget is for production cold-scans, not for catching bugs in dev
 
 cleanup() {
   set +e
@@ -118,6 +118,11 @@ EOF
 # ── 3. Start container ───────────────────────────────────────────────────────
 
 info "Starting container against $SISTER_REPO/src/synopsis as workspace..."
+# Mount the config inside /aegis/ so the user file's `require("@aegis/...")`
+# resolves the workspace packages at /aegis/node_modules. Mounting at
+# /opt/aegis/ (which Helm currently does) does not work with Node's
+# module-resolution rules from outside the package tree - documented as a
+# follow-up gap to fix in the Helm chart.
 docker run -d \
   --name "$CONTAINER" \
   -p "$PORT:8080" \
@@ -125,7 +130,7 @@ docker run -d \
   -e GITHUB_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
   -e METRICS_TOKEN="$METRICS_TOKEN" \
   -e ANTHROPIC_API_KEY="not-used-in-smoke" \
-  -v "$TMPDIR/aegis.config.js:/opt/aegis/aegis.config.js:ro" \
+  -v "$TMPDIR/aegis.config.js:/aegis/aegis.config.js:ro" \
   -v "$SISTER_REPO/src/synopsis:/workspace/synopsis:ro" \
   aegis:smoke \
   > /dev/null
