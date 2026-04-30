@@ -297,15 +297,53 @@ export class AgentWorker {
     ].join("\n\n");
 
     const active = this.active;
+    logger.info(`[agent] query starting on ${active.provider}/${active.modelId}, ${tools.length} tools available`);
+    logger.debug(`[agent] question: ${question.slice(0, 200)}${question.length > 200 ? "..." : ""}`);
+
     const release = await this.semaphoreFor(active.provider).acquire();
     let timedOut = false;
     try {
       const getApiKey = makeGetApiKey(config);
-      const agent = new Agent({ initialState: { systemPrompt, model: active.model, tools }, ...(getApiKey ? { getApiKey } : {}) });
+      // Debug: peek at the outbound API payload so we can see what tools are
+      // actually being sent. Required because Vultr / custom providers
+      // sometimes ignore the `tools` field silently and the LLM hallucinates
+      // an answer with zero tool calls.
+      const onPayload = (payload: unknown): unknown | undefined => {
+        const p = payload as { tools?: unknown[]; messages?: unknown[]; model?: string };
+        const toolNames = Array.isArray(p.tools)
+          ? p.tools.map((t) => (t as { function?: { name?: string }; name?: string }).function?.name ?? (t as { name?: string }).name).join(",")
+          : "(none)";
+        const msgCount = Array.isArray(p.messages) ? p.messages.length : 0;
+        logger.info(`[agent] -> ${p.model}: ${msgCount} msgs, tools=[${toolNames}]`);
+        return undefined;
+      };
+      const agent = new Agent({
+        initialState: { systemPrompt, model: active.model, tools },
+        onPayload,
+        ...(getApiKey ? { getApiKey } : {}),
+      });
 
       let finalMessages: AgentMessage[] = [];
+      let toolCallCount = 0;
       const unsubscribe = agent.subscribe(async (event) => {
-        if (event.type === "agent_end") finalMessages = event.messages;
+        // Pi Agent emits tool_execution_* events from its Agent class (not the
+        // lower-level toolcall_* events from the streaming proxy). The
+        // execution variants fire after the LLM emits a tool_call AND the
+        // Agent dispatches it to the tool handler.
+        const e = event as { type: string; toolCall?: { name?: string }; toolName?: string; message?: { content?: Array<{ type: string; name?: string }>; usage?: { totalTokens?: number } } };
+        if (e.type === "tool_execution_start") {
+          toolCallCount++;
+          const name = e.toolName ?? e.toolCall?.name ?? "unknown";
+          logger.info(`[agent] tool #${toolCallCount}: ${name}`);
+        } else if (e.type === "agent_end") {
+          finalMessages = (event as unknown as { messages: AgentMessage[] }).messages;
+          const usage = e.message?.usage?.totalTokens;
+          logger.info(`[agent] query complete (${toolCallCount} tool calls${usage ? `, ${usage} tokens` : ""})`);
+        } else if (e.type === "error") {
+          logger.error(`[agent] error event during query: ${JSON.stringify(event).slice(0, 300)}`);
+        } else if (e.type === "turn_end") {
+          logger.debug(`[agent] turn_end`);
+        }
       });
 
       const timeoutId = setTimeout(() => { timedOut = true; agent.abort(); }, timeoutMs);
@@ -318,7 +356,7 @@ export class AgentWorker {
       }
 
       if (timedOut) {
-        logger.warn(`[agent] query timed out after ${timeoutMs}ms`);
+        logger.warn(`[agent] query timed out after ${timeoutMs}ms (${toolCallCount} tool calls before abort)`);
         throw new QueryTimeoutError(timeoutMs);
       }
 

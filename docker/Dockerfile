@@ -93,6 +93,11 @@ RUN mkdir -p /aegis/node_modules/@aegis && \
     done
 
 COPY --from=synopsis-build /out/synopsis/synopsis /opt/aegis/bin/synopsis
+# BuildHost-netcore is the child process .NET MSBuild spawns to evaluate
+# .csproj files. Single-file publish leaves it as a sibling directory next
+# to the binary; without it, Roslyn loads zero projects (filesystem
+# discovery still works, semantic analysis does not).
+COPY --from=synopsis-build /out/synopsis/BuildHost-netcore /opt/aegis/bin/BuildHost-netcore
 COPY --from=skills /skills /opt/aegis/skills/
 COPY SOUL.md /opt/aegis/SOUL.md
 COPY docker/entrypoint.sh /entrypoint.sh
