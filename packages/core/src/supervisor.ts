@@ -41,17 +41,29 @@ export class Supervisor {
 
     this.proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      if (readySignal && text.includes(readySignal)) {
+    // Scan both stdout and stderr for the ready signal. Synopsis emits its
+    // "MCP server ready" line on stderr (alongside the rest of its log
+    // output); other supervised binaries may use stdout. Either is fine.
+    let signalled = false;
+    const checkSignal = (text: string): void => {
+      if (signalled || !readySignal) return;
+      if (text.includes(readySignal)) {
+        signalled = true;
         this.backoffMs = 1000;
         onReady?.();
       }
+    };
+
+    this.proc.stdout?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      checkSignal(text);
       logger.debug(`[synopsis] ${text.trimEnd()}`);
     });
 
     this.proc.stderr?.on("data", (chunk: Buffer) => {
-      logger.warn(`[synopsis:stderr] ${chunk.toString().trimEnd()}`);
+      const text = chunk.toString();
+      checkSignal(text);
+      logger.warn(`[synopsis:stderr] ${text.trimEnd()}`);
     });
 
     this.proc.on("exit", (code, signal) => {

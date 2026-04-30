@@ -41,7 +41,19 @@ COPY --from=build-context dotnet-episteme-skills/skills/ /skills/
 
 # ── Stage 4: final image ─────────────────────────────────────────────────────
 FROM node:22-slim
-RUN npm install -g pnpm && apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+# libicu* required by .NET for globalization. The synopsis binary is
+# self-contained for the .NET runtime, but MSBuild (used to evaluate
+# .csproj files) loads the .NET SDK at runtime and needs DOTNET_ROOT
+# to point at a valid install. We copy the SDK from stage 1 below.
+RUN npm install -g pnpm && apt-get update && apt-get install -y --no-install-recommends git ca-certificates libicu72 && rm -rf /var/lib/apt/lists/*
+
+# Bring the .NET SDK from the build stage so MSBuildLocator can find SDK
+# targets when Synopsis evaluates .csproj files. This is the price of a
+# graph that resolves real project references; the alternative is asking
+# operators to install dotnet themselves on the host. Image size hit ~750MB.
+COPY --from=synopsis-build /usr/share/dotnet /usr/share/dotnet
+ENV DOTNET_ROOT=/usr/share/dotnet \
+    PATH=/usr/share/dotnet:$PATH
 
 WORKDIR /aegis
 COPY --from=ts-build /aegis/package.json ./
@@ -67,6 +79,18 @@ COPY --from=ts-build /aegis/packages/adapter-cli/dist    ./packages/adapter-cli/
 COPY --from=ts-build /aegis/packages/cli/dist            ./packages/cli/dist/
 
 RUN pnpm install --prod --frozen-lockfile
+
+# pnpm workspaces create @aegis/* symlinks inside each package that depends
+# on them, but not at the workspace root. The user-mounted aegis.config.ts
+# does `require("@aegis/adapter-github")` from /aegis/aegis.config.js, so
+# Node needs to find the @aegis namespace at /aegis/node_modules/@aegis/.
+# Adapters are NOT direct deps of any workspace package - the user's config
+# is the only thing that imports them - so we link every workspace package
+# explicitly.
+RUN mkdir -p /aegis/node_modules/@aegis && \
+    for p in sdk core agent adapter-github adapter-gitlab adapter-slack adapter-gchat adapter-cli cli; do \
+      ln -s /aegis/packages/$p /aegis/node_modules/@aegis/$p; \
+    done
 
 COPY --from=synopsis-build /out/synopsis/synopsis /opt/aegis/bin/synopsis
 COPY --from=skills /skills /opt/aegis/skills/

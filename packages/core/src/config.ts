@@ -89,14 +89,20 @@ export const HttpConfigSchema = z.object({
 });
 
 /**
- * Adapters are constructed by user-imported factory calls (e.g.
- * `github({...})`). We can't statically validate the full shape (it's
- * runtime-typed by adapter package), so we accept `passthrough()` but
- * require an `id` so loaders, diffing, and routing all have something to
- * key by. A typo'd codeHosts entry without `id` fails fast at load time
- * instead of silently no-op'ing on every reload.
+ * Adapters are constructed instances (e.g. `github({...})`). We need to
+ * validate they have an `id` without transforming them - `z.object().parse()`
+ * returns a plain copy and would strip the class prototype, leaving only
+ * own properties and breaking every method call. `z.custom` runs the
+ * predicate and returns the value untouched.
  */
-const AdapterRefSchema = z.object({ id: z.string().min(1) }).passthrough();
+const AdapterRefSchema = z.custom<{ id: string }>(
+  (v): v is { id: string } => {
+    if (typeof v !== "object" || v === null) return false;
+    const id = (v as { id?: unknown }).id;
+    return typeof id === "string" && id.length > 0;
+  },
+  { message: "adapter must be a constructed instance with a non-empty string `id`" },
+);
 
 export const AegisConfigSchema = z.object({
   workspace: z.string().default("/workspace"),

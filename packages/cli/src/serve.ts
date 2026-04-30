@@ -48,7 +48,7 @@ export async function serve(rawConfig: unknown, opts: ServeOptions): Promise<voi
     command: synopsisBin,
     args: synopsisArgs,
     logger,
-    readySignal: "MCP server listening",
+    readySignal: "MCP server ready",
     onReady: () => {
       readiness.markReady("synopsis");
       mcp.connect()

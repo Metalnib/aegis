@@ -39,7 +39,7 @@ export interface ConfigStoreOptions {
   /** Path to the config file on disk. Used for fs.watchFile and human-readable logs. */
   configPath: string;
   /** Loader the CLI provides. Must re-import the config from disk on every call (cache-busted). */
-  loader: () => unknown;
+  loader: () => unknown | Promise<unknown>;
   /** Initial validated config the store starts with. Skips loading on construct. */
   initial: AegisConfig;
   logger: { info(msg: string): void; warn(msg: string): void; error(msg: string, err?: unknown): void; debug?(msg: string): void };
@@ -167,7 +167,7 @@ export class ConfigStore {
   private async attemptReload(): Promise<ReloadOutcome> {
     let raw: unknown;
     try {
-      raw = this.opts.loader();
+      raw = await this.opts.loader();
     } catch (err) {
       return { kind: "load-error", error: (err as Error).message };
     }
