@@ -36,6 +36,7 @@ RUN npm install -g pnpm && apt-get update && apt-get install -y --no-install-rec
 WORKDIR /aegis
 COPY --from=ts-build /aegis/package.json ./
 COPY --from=ts-build /aegis/pnpm-workspace.yaml ./
+COPY --from=ts-build /aegis/pnpm-lock.yaml ./
 COPY --from=ts-build /aegis/packages/sdk/package.json            ./packages/sdk/
 COPY --from=ts-build /aegis/packages/core/package.json           ./packages/core/
 COPY --from=ts-build /aegis/packages/agent/package.json          ./packages/agent/
